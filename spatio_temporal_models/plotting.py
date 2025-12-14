@@ -5,12 +5,16 @@ This module provides functions to visualize simulation results including:
 - Molecule concentration time series
 - 3D spatial distribution
 - 2D orthogonal projections (XY, XZ, YZ)
+- Animated GIF of temporal evolution
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from skimage import measure
+from matplotlib.animation import FuncAnimation
+import tempfile
+import os
 
 
 def plot_molecule_concentrations(trajectories, output_filename='concentration_plot.png'):
@@ -81,7 +85,7 @@ def plot_molecule_concentrations(trajectories, output_filename='concentration_pl
     ax1.plot(time_steps, rna_counts, color=RNA_COLOR, linewidth=2, label='RNA', alpha=0.9)
     ax1.plot(time_steps, protein_counts, color=PROTEIN_COLOR, linewidth=2, label='Protein', alpha=0.9)
     ax1.set_ylabel('Molecule Count', fontsize=11, fontweight='medium', color=TEXT_COLOR)
-    ax1.set_title('Molecule Concentrations Over Time', fontsize=13, fontweight='bold', pad=10, color='white')
+    ax1.set_title('Molecule Concentrations Over Time', fontsize=13, pad=10, color='white')
     ax1.legend(loc='upper right', fontsize=10, framealpha=0.8, edgecolor=GRID_COLOR, 
                facecolor=BG_COLOR, labelcolor=TEXT_COLOR)
     ax1.grid(True, alpha=0.3, linestyle='-', linewidth=0.3, color=GRID_COLOR)
@@ -198,7 +202,7 @@ def plot_all_projections(trajectories, simulation_volume_size, masks_nucleus, ma
             ax.set_ylim([ylim[1], ylim[0]])  # Flip for microscopy convention
         ax.set_xlabel(xlabel, fontsize=9, color=text_color)
         ax.set_ylabel(ylabel, fontsize=9, color=text_color)
-        ax.set_title(title, fontsize=10, fontweight='bold', color='white', pad=8)
+        ax.set_title(title, fontsize=10, color='white', pad=8)
         ax.tick_params(colors=text_color, labelsize=8)
         ax.grid(True, linewidth=0.3, alpha=0.4, color=grid_color)
         for spine in ax.spines.values():
@@ -245,7 +249,7 @@ def plot_all_projections(trajectories, simulation_volume_size, masks_nucleus, ma
     ax3d.set_xlabel('X', fontsize=8, color=text_color, labelpad=2)
     ax3d.set_ylabel('Y', fontsize=8, color=text_color, labelpad=2)
     ax3d.set_zlabel('Z', fontsize=8, color=text_color, labelpad=2)
-    ax3d.set_title('3D View', fontsize=10, fontweight='bold', color='white', pad=5)
+    ax3d.set_title('3D View', fontsize=10, color='white', pad=5)
     ax3d.tick_params(colors=text_color, labelsize=6)
     ax3d.xaxis.pane.fill = False
     ax3d.yaxis.pane.fill = False
@@ -300,7 +304,7 @@ def plot_all_projections(trajectories, simulation_volume_size, masks_nucleus, ma
     style_2d_axis(ax_yz, 'Y (px)', 'Z (px)', 'YZ (side view)', 
                   [0, simulation_volume_size[1]], [0, simulation_volume_size[2]], origin_lower=True)
     
-    fig.suptitle(f'Cell Simulation at t={last_time_step}s', fontsize=12, fontweight='bold', 
+    fig.suptitle(f'Cell Simulation at t={last_time_step}s', fontsize=12,
                  color='white', y=0.98)
     plt.tight_layout()
     plt.savefig(output_filename, dpi=150, bbox_inches='tight', facecolor='black', edgecolor='none')
@@ -308,3 +312,178 @@ def plot_all_projections(trajectories, simulation_volume_size, masks_nucleus, ma
     plt.close()
     
     return {'xy': (nucleus_xy, cytosol_xy), 'xz': (nucleus_xz, cytosol_xz), 'yz': (nucleus_yz, cytosol_yz)}
+
+
+def generate_temporal_gif(trajectories, simulation_volume_size, masks_nucleus, masks_cytosol,
+                          transcription_site=None, output_filename='simulation.gif', fps=5,
+                          skip_frames=1, dpi=80, show_surfaces=True):
+    """
+    Generate animated GIF showing temporal evolution of particles in 3D.
+    
+    Parameters
+    ----------
+    trajectories : dict
+        Simulation results containing RNA and Protein trajectories
+    simulation_volume_size : list
+        [X, Y, Z] dimensions of the simulation volume
+    masks_nucleus : ndarray
+        3D boolean mask for nucleus
+    masks_cytosol : ndarray
+        3D boolean mask for cytosol
+    transcription_site : ndarray, optional
+        Position of transcription site [X, Y, Z]
+    output_filename : str
+        Path to save the output GIF
+    fps : int
+        Frames per second for the animation
+    skip_frames : int
+        Only render every Nth frame (1=all, 5=every 5th frame)
+    dpi : int
+        DPI for GIF frames (lower = smaller file, faster generation)
+    show_surfaces : bool
+        If True, render 3D cell surfaces (slower). If False, only show particles (faster).
+    """
+    try:
+        import imageio
+    except ImportError:
+        print("Error: imageio is required for GIF generation. Install with: pip install imageio")
+        return
+    
+    time_steps = trajectories['time_steps']
+    
+    # Apply skip_frames to reduce number of frames
+    time_steps_to_render = time_steps[::skip_frames]
+    
+    # Dark theme colors (matching static plots)
+    GRID_COLOR = '#333333'
+    TEXT_COLOR = '#CCCCCC'
+    RNA_COLOR = '#EF5350'
+    PROTEIN_COLOR = '#64B5F6'
+    TS_COLOR = '#4CAF50'
+    
+    # Pre-compute cell surfaces (only if showing surfaces)
+    nucleus_verts, nucleus_faces = None, None
+    cytosol_verts, cytosol_faces = None, None
+    
+    if show_surfaces:
+        try:
+            nucleus_verts, nucleus_faces, _, _ = measure.marching_cubes(masks_nucleus, level=0.5)
+        except:
+            pass
+        
+        try:
+            cytosol_verts, cytosol_faces, _, _ = measure.marching_cubes(masks_cytosol, level=0.5)
+        except:
+            pass
+    
+    # Generate frames
+    surface_mode = "with surfaces" if show_surfaces else "particles only (fast)"
+    print(f"Generating {len(time_steps_to_render)} frames for GIF ({surface_mode}, skip={skip_frames}, dpi={dpi})...")
+    frames = []
+    
+    for frame_idx, t in enumerate(time_steps_to_render):
+        # Extract positions at this time step
+        rna_positions = []
+        protein_positions = []
+        
+        for rna_list in trajectories['RNA_trajectories'].values():
+            for snapshot in rna_list:
+                if snapshot['time'] == t:
+                    rna_positions.append(snapshot['position'])
+                    break
+                    
+        for protein_list in trajectories['Protein_trajectories'].values():
+            for snapshot in protein_list:
+                if snapshot['time'] == t:
+                    protein_positions.append(snapshot['position'])
+                    break
+        
+        rna_pos = np.array(rna_positions) if rna_positions else np.array([]).reshape(0, 3)
+        protein_pos = np.array(protein_positions) if protein_positions else np.array([]).reshape(0, 3)
+        
+        # Create figure
+        fig = plt.figure(figsize=(8, 6), facecolor='black')
+        ax = fig.add_subplot(111, projection='3d', facecolor='black')
+        ax.set_facecolor('black')
+        
+        # Plot cell surfaces
+        if nucleus_verts is not None:
+            ax.plot_trisurf(nucleus_verts[:, 0], nucleus_verts[:, 1], nucleus_faces, nucleus_verts[:, 2],
+                           color='#E57373', alpha=0.4, shade=True)
+        
+        if cytosol_verts is not None:
+            ax.plot_trisurf(cytosol_verts[:, 0], cytosol_verts[:, 1], cytosol_faces, cytosol_verts[:, 2],
+                           color='#78909C', alpha=0.3, shade=True)
+        
+        # Plot particles
+        if len(protein_pos) > 0:
+            ax.scatter(protein_pos[:, 0], protein_pos[:, 1], protein_pos[:, 2],
+                      c=PROTEIN_COLOR, s=4, alpha=0.7, label=f'Protein ({len(protein_pos)})')
+        if len(rna_pos) > 0:
+            ax.scatter(rna_pos[:, 0], rna_pos[:, 1], rna_pos[:, 2],
+                      c=RNA_COLOR, s=4, alpha=0.9, label=f'RNA ({len(rna_pos)})')
+        
+        # Plot transcription site
+        if transcription_site is not None:
+            ax.scatter([transcription_site[0]], [transcription_site[1]], [transcription_site[2]],
+                      c=TS_COLOR, s=20, alpha=1.0, label='TS')
+        
+        # Style axis
+        ax.set_xlim([0, simulation_volume_size[0]])
+        ax.set_ylim([0, simulation_volume_size[1]])
+        ax.set_zlim([0, simulation_volume_size[2]])
+        ax.set_box_aspect([simulation_volume_size[0], simulation_volume_size[1], simulation_volume_size[2]])
+        ax.set_xlabel('X', fontsize=8, color=TEXT_COLOR, labelpad=2)
+        ax.set_ylabel('Y', fontsize=8, color=TEXT_COLOR, labelpad=2)
+        ax.set_zlabel('Z', fontsize=8, color=TEXT_COLOR, labelpad=2)
+        ax.set_title(f't = {t}s', fontsize=12, color='white', pad=10)
+        ax.tick_params(colors=TEXT_COLOR, labelsize=6)
+        
+        # Style panes
+        ax.xaxis.pane.fill = False
+        ax.yaxis.pane.fill = False
+        ax.zaxis.pane.fill = False
+        ax.xaxis.pane.set_edgecolor(GRID_COLOR)
+        ax.yaxis.pane.set_edgecolor(GRID_COLOR)
+        ax.zaxis.pane.set_edgecolor(GRID_COLOR)
+        ax.xaxis._axinfo['grid']['color'] = GRID_COLOR
+        ax.yaxis._axinfo['grid']['color'] = GRID_COLOR
+        ax.zaxis._axinfo['grid']['color'] = GRID_COLOR
+        ax.xaxis._axinfo['grid']['linewidth'] = 0.3
+        ax.yaxis._axinfo['grid']['linewidth'] = 0.3
+        ax.zaxis._axinfo['grid']['linewidth'] = 0.3
+        
+        # Legend
+        ax.legend(loc='upper left', fontsize=7, facecolor='black', edgecolor=GRID_COLOR, labelcolor='white')
+        
+        plt.tight_layout()
+        
+        # Save frame to buffer (compatible with all backends including macOS)
+        from io import BytesIO
+        buf = BytesIO()
+        fig.savefig(buf, format='png', dpi=dpi, facecolor='black', edgecolor='none', bbox_inches='tight')
+        buf.seek(0)
+        frame = np.array(plt.imread(buf))
+        # Convert from float (0-1) to uint8 (0-255) if needed
+        if frame.dtype == np.float32 or frame.dtype == np.float64:
+            frame = (frame * 255).astype(np.uint8)
+        # Remove alpha channel if present
+        if frame.shape[2] == 4:
+            frame = frame[:, :, :3]
+        frames.append(frame)
+        buf.close()
+        
+        plt.close(fig)
+        
+        # Progress indicator
+        total_frames = len(time_steps_to_render)
+        if (frame_idx + 1) % max(1, total_frames // 10) == 0 or frame_idx == total_frames - 1:
+            print(f"  Frame {frame_idx + 1}/{total_frames}")
+    
+    # Save as GIF
+    print(f"Saving GIF to {output_filename}...")
+    imageio.mimsave(output_filename, frames, fps=fps, loop=0)
+    print(f"GIF saved to {output_filename}")
+    
+    return output_filename
+

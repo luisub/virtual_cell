@@ -5,7 +5,7 @@ from typing import List, Dict, Any
 import yaml
 from pathlib import Path
 # Import plotting functions from separate module
-from plotting import plot_molecule_concentrations, plot_all_projections
+from plotting import plot_molecule_concentrations, plot_all_projections, generate_temporal_gif
 
 
 @dataclass
@@ -92,6 +92,13 @@ class SimulationParameters:
     apply_drug: bool = False
     drug_application_time: float = 120.0
     inhibited_parameters: Dict[str, float] = field(default_factory=lambda: {'transport_rate': 0.1})
+    
+    # Output options
+    generate_gif: bool = False
+    gif_fps: int = 5
+    gif_skip_frames: int = 1      # Render every Nth frame
+    gif_dpi: int = 80             # DPI for GIF frames
+    gif_show_surfaces: bool = True  # Show cell surfaces in GIF (slower)
     
     def __post_init__(self):
         """Validate parameters after initialization."""
@@ -184,6 +191,11 @@ class SimulationParameters:
             'apply_drug': self.apply_drug,
             'drug_application_time': self.drug_application_time,
             'inhibited_parameters': dict(self.inhibited_parameters),
+            'generate_gif': self.generate_gif,
+            'gif_fps': self.gif_fps,
+            'gif_skip_frames': self.gif_skip_frames,
+            'gif_dpi': self.gif_dpi,
+            'gif_show_surfaces': self.gif_show_surfaces,
         }
     
     @classmethod
@@ -229,6 +241,19 @@ class SimulationParameters:
                 params['drug_application_time'] = config['drug']['application_time']
             if 'inhibited_parameters' in config['drug']:
                 params['inhibited_parameters'] = config['drug']['inhibited_parameters']
+        
+        # Output options
+        if 'output' in config:
+            if 'generate_gif' in config['output']:
+                params['generate_gif'] = config['output']['generate_gif']
+            if 'gif_fps' in config['output']:
+                params['gif_fps'] = config['output']['gif_fps']
+            if 'gif_skip_frames' in config['output']:
+                params['gif_skip_frames'] = config['output']['gif_skip_frames']
+            if 'gif_dpi' in config['output']:
+                params['gif_dpi'] = config['output']['gif_dpi']
+            if 'gif_show_surfaces' in config['output']:
+                params['gif_show_surfaces'] = config['output']['gif_show_surfaces']
         
         return cls(**params)
 
@@ -656,4 +681,19 @@ if __name__ == "__main__":
     print("Plotting all projections (XY, XZ, YZ)...")
     plot_all_projections(results, params['simulation_volume_size'], results['nucleus_mask'], results['cytosol_mask'],
                          transcription_site=simulator.transcription_site, output_filename='projections.png')
-
+    
+    # Generate animated GIF if enabled
+    if params.get('generate_gif', False):
+        print("Generating temporal evolution GIF...")
+        generate_temporal_gif(
+            results, 
+            params['simulation_volume_size'], 
+            results['nucleus_mask'], 
+            results['cytosol_mask'],
+            transcription_site=simulator.transcription_site,
+            output_filename='simulation.gif',
+            fps=params.get('gif_fps', 5),
+            skip_frames=params.get('gif_skip_frames', 1),
+            dpi=params.get('gif_dpi', 80),
+            show_surfaces=params.get('gif_show_surfaces', True)
+        )

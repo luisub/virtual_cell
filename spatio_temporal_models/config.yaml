@@ -11,7 +11,7 @@ kinetics:
   k_off: 0.1             # Transcription site deactivation rate
   k_r: 3.0               # RNA production rate (when TS is ON)
   gamma_r: 0.05          # RNA degradation rate
-  k_p: 0.9               # Protein production rate (per cytoplasmic RNA)
+  k_p: 0.2               # Protein production rate (per cytoplasmic RNA)
   gamma_p: 0.65          # Protein degradation rate
   k_diff_r: 10.0         # RNA diffusion coefficient
   k_diff_p: 10.0         # Protein diffusion coefficient
@@ -57,3 +57,14 @@ drug:
   application_time: 120         # Time to apply drug (seconds)
   inhibited_parameters:
     transport_rate: 0.1         # New transport rate after drug
+
+# Output Options
+# ---------------
+
+output:
+  generate_gif: true            # Generate animated GIF of temporal evolution
+  gif_fps: 4                    # Frames per second for GIF animation
+  gif_skip_frames: 4            # Only render every Nth frame (1=all, 5=every 5th)
+  gif_dpi: 80                   # DPI for GIF frames (lower = smaller file)
+  gif_show_surfaces: false      # Show cell surfaces (SLOW - disable for faster generation)
+
