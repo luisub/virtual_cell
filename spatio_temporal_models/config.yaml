@@ -1,0 +1,59 @@
+# Gene Expression Simulation Configuration
+# =========================================
+# This file contains all parameters for the 3D stochastic gene expression simulation.
+
+# Kinetic Rates
+# -------------
+# All rates are in units of 1/second
+
+kinetics:
+  k_on: 0.2              # Transcription site activation rate
+  k_off: 0.1             # Transcription site deactivation rate
+  k_r: 3.0               # RNA production rate (when TS is ON)
+  gamma_r: 0.05          # RNA degradation rate
+  k_p: 0.9               # Protein production rate (per cytoplasmic RNA)
+  gamma_p: 0.65          # Protein degradation rate
+  k_diff_r: 10.0         # RNA diffusion coefficient
+  k_diff_p: 10.0         # Protein diffusion coefficient
+  transport_rate: 2.0    # Nuclear export rate (for RNA near envelope)
+
+# Cell Geometry (in pixels)
+# -------------------------
+# All sizes are [X, Y, Z] dimensions
+# For half-ellipsoid shapes, these represent the full ellipsoid diameters
+# (actual dome height is half the Z value)
+
+geometry:
+  simulation_volume_size: [512, 512, 100]   # Microscopy field of view
+  cytosol_size: [350, 350, 80]              # Cell diameter/height
+  nucleus_size: [120, 100, 60]              # Nucleus diameter/height
+  nucleus_xy_offset: [0, 0]                 # Nucleus offset from center [X, Y]
+
+# Simulation Settings
+# -------------------
+
+simulation:
+  total_time: 100        # Total simulation time (seconds)
+  frame_rate: 1          # Save state every N seconds
+  burnin_time: 0         # Time before recording starts (seconds)
+
+# Transcription Site Options
+# --------------------------
+
+transcription_site:
+  position: random       # Options: 'center' or 'random'
+
+# Protein Movement
+# ----------------
+
+movement:
+  protein_into_nucleus: false   # Allow proteins to enter nucleus
+
+# Drug Perturbation (optional)
+# ----------------------------
+
+drug:
+  apply: false
+  application_time: 120         # Time to apply drug (seconds)
+  inhibited_parameters:
+    transport_rate: 0.1         # New transport rate after drug

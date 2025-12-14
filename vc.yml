@@ -1,0 +1,24 @@
+name: vc
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - numpy=1.26.4
+  - scipy
+  - matplotlib
+  - seaborn=0.13.2
+  - scikit-image=0.23.2
+  - pandas
+  - ipykernel=6.29.4
+  - ipywidgets>=7.6.5
+  - ipympl>=0.9.4
+  - tifffile>=2023.2.28
+  - pyyaml>=6.0.1
+  - joblib=1.4.2
+  - pip:
+      - cellpose==3.0.9
+      - pydantic==2.7.4
+      - trackpy>=0.7.0
+      - gillespy2>=1.8.3
