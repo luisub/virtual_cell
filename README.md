@@ -194,6 +194,45 @@ microscopy:
     nucleus: 150.0        # Nuclear intensity
 ```
 
+### Microscopy Output Format
+
+The simulator generates a **5D NumPy array** with shape `[T, Z, Y, X, C]`:
+
+| Dimension | Description | Typical Value |
+|:----------|:------------|:--------------|
+| T | Time frames | 361 (1800s ÷ 5s) |
+| Z | Z-slices | 12 |
+| Y, X | Image size | 512 × 512 |
+| C | Channels | 4 |
+
+**Channel Mapping:**
+
+| Channel | Name | Signal Source | Rendering |
+|:--------|:-----|:--------------|:----------|
+| 0 | TS (Transcription Site) | Nascent RNAs at transcription site | Bright spot (amplitude ∝ nascent RNA count) |
+| 1 | Mature RNA | Cytoplasmic mRNAs | Individual Gaussian spots |
+| 2 | Nascent Protein | Proteins being translated | Spots at ribosome positions |
+| 3 | Mature Protein | Freely diffusing proteins | Diffuse cytosolic signal |
+
+**Output Files:**
+
+| File | Description |
+|:-----|:------------|
+| `simulated_microscopy.tif` | Multi-channel TIFF (TCZYX, uint16, ZLIB compressed) |
+| `mask_cytosol.tif` | Cytosol segmentation mask (ZYX) |
+| `mask_nucleus.tif` | Nucleus segmentation mask (ZYX) |
+| `ground_truth_ts.csv` | TS positions and nascent counts per frame |
+| `ground_truth_mature_rna.csv` | Individual RNA positions (x, y, z, t, intensity) |
+| `ground_truth_nascent_protein.csv` | Translating protein positions |
+| `ground_truth_combined.csv` | All molecules combined |
+| `simulation_metadata.txt` | All parameters (MicroLive-compatible) |
+
+**Ground Truth CSV Columns:**
+
+```
+time_idx, z, y, x, intensity, molecule_id, state, parent_id, ...
+```
+
 ---
 
 ## Notebooks

@@ -844,12 +844,13 @@ def save_tiff_for_microlive(
               f"TimeIncrement={metadata['TimeIncrement']}s")
         print(f"  Channels: {channel_names[:C]}")
     
-    # Save with tifffile
+    # Save with tifffile (with ZLIB compression to reduce file size)
     tifffile.imwrite(
         output_path,
         img_tczyx,
         shape=img_tczyx.shape,
         dtype='uint16',
+        compression='zlib',  # ZLIB compression (compatible with ImageJ/FIJI)
         imagej=False,
         metadata=metadata
     )
