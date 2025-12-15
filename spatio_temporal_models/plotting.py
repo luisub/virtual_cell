@@ -17,7 +17,8 @@ import tempfile
 import os
 
 
-def plot_molecule_concentrations(trajectories, output_filename='concentration_plot.png'):
+def plot_molecule_concentrations(trajectories, output_filename='concentration_plot.png',
+                                  show_nascent_separately=True):
     """
     Plot RNA and Protein molecule counts over time.
     
@@ -28,6 +29,8 @@ def plot_molecule_concentrations(trajectories, output_filename='concentration_pl
         'TS_trajectory', and 'time_steps'.
     output_filename : str
         Path to save the output plot.
+    show_nascent_separately : bool
+        If True, show nascent and mature counts separately.
         
     Returns
     -------
@@ -36,29 +39,39 @@ def plot_molecule_concentrations(trajectories, output_filename='concentration_pl
     """
     time_steps = trajectories['time_steps']
     
-    # Count molecules at each time step
+    # Count molecules at each time step (separating nascent vs mature)
     rna_counts = []
+    rna_nascent_counts = []
     protein_counts = []
+    protein_nascent_counts = []
     ts_states = []
     
     for t in time_steps:
         # Count RNAs at this time step
-        rna_count = 0
+        rna_total = 0
+        rna_nascent = 0
         for rna_list in trajectories['RNA_trajectories'].values():
             for snapshot in rna_list:
                 if snapshot['time'] == t:
-                    rna_count += 1
+                    rna_total += 1
+                    if snapshot.get('state') == 'nascent':
+                        rna_nascent += 1
                     break  # Each RNA only counted once per time
-        rna_counts.append(rna_count)
+        rna_counts.append(rna_total)
+        rna_nascent_counts.append(rna_nascent)
         
         # Count Proteins at this time step
-        protein_count = 0
+        protein_total = 0
+        protein_nascent = 0
         for protein_list in trajectories['Protein_trajectories'].values():
             for snapshot in protein_list:
                 if snapshot['time'] == t:
-                    protein_count += 1
+                    protein_total += 1
+                    if snapshot.get('state') == 'nascent':
+                        protein_nascent += 1
                     break  # Each Protein only counted once per time
-        protein_counts.append(protein_count)
+        protein_counts.append(protein_total)
+        protein_nascent_counts.append(protein_nascent)
         
         # Get TS state at this time step
         for ts_snapshot in trajectories['TS_trajectory']:
@@ -67,9 +80,11 @@ def plot_molecule_concentrations(trajectories, output_filename='concentration_pl
                 break
     
     # Colors matching the 3D simulation view
-    RNA_COLOR = '#EF5350'      # Red
-    PROTEIN_COLOR = '#64B5F6'  # Blue
-    TS_COLOR = '#4CAF50'       # Green
+    RNA_COLOR = '#EF5350'           # Red (mature)
+    RNA_NASCENT_COLOR = '#FFAB91'   # Light pink (nascent)
+    PROTEIN_COLOR = '#64B5F6'       # Blue (mature)
+    PROTEIN_NASCENT_COLOR = '#90CAF9'  # Light blue (nascent)
+    TS_COLOR = '#4CAF50'            # Green
     GRID_COLOR = '#333333'
     TEXT_COLOR = '#CCCCCC'
     BG_COLOR = 'black'
@@ -82,12 +97,30 @@ def plot_molecule_concentrations(trajectories, output_filename='concentration_pl
     # Top panel: RNA and Protein counts
     ax1 = axes[0]
     ax1.set_facecolor(BG_COLOR)
-    ax1.plot(time_steps, rna_counts, color=RNA_COLOR, linewidth=2, label='RNA', alpha=0.9)
-    ax1.plot(time_steps, protein_counts, color=PROTEIN_COLOR, linewidth=2, label='Protein', alpha=0.9)
+    
+    if show_nascent_separately and (any(rna_nascent_counts) or any(protein_nascent_counts)):
+        # Calculate mature counts
+        rna_mature = [total - nascent for total, nascent in zip(rna_counts, rna_nascent_counts)]
+        protein_mature = [total - nascent for total, nascent in zip(protein_counts, protein_nascent_counts)]
+        
+        # Plot mature counts (solid lines)
+        ax1.plot(time_steps, rna_mature, color=RNA_COLOR, linewidth=2, label='RNA (mature)', alpha=0.9)
+        ax1.plot(time_steps, protein_mature, color=PROTEIN_COLOR, linewidth=2, label='Protein (mature)', alpha=0.9)
+        
+        # Plot nascent counts (dashed lines, lighter colors)
+        ax1.plot(time_steps, rna_nascent_counts, color=RNA_NASCENT_COLOR, linewidth=1.5, 
+                 label='RNA (nascent)', alpha=0.8, linestyle='--')
+        ax1.plot(time_steps, protein_nascent_counts, color=PROTEIN_NASCENT_COLOR, linewidth=1.5, 
+                 label='Protein (nascent)', alpha=0.8, linestyle='--')
+    else:
+        # Original behavior - total counts only
+        ax1.plot(time_steps, rna_counts, color=RNA_COLOR, linewidth=2, label='RNA', alpha=0.9)
+        ax1.plot(time_steps, protein_counts, color=PROTEIN_COLOR, linewidth=2, label='Protein', alpha=0.9)
+    
     ax1.set_ylabel('Molecule Count', fontsize=11, fontweight='medium', color=TEXT_COLOR)
     ax1.set_title('Molecule Concentrations Over Time', fontsize=13, pad=10, color='white')
-    ax1.legend(loc='upper right', fontsize=10, framealpha=0.8, edgecolor=GRID_COLOR, 
-               facecolor=BG_COLOR, labelcolor=TEXT_COLOR)
+    ax1.legend(loc='upper right', fontsize=9, framealpha=0.8, edgecolor=GRID_COLOR, 
+               facecolor=BG_COLOR, labelcolor=TEXT_COLOR, ncol=2)
     ax1.grid(True, alpha=0.3, linestyle='-', linewidth=0.3, color=GRID_COLOR)
     ax1.set_xlim([time_steps[0], time_steps[-1]])
     ax1.spines['top'].set_visible(False)
@@ -113,7 +146,7 @@ def plot_molecule_concentrations(trajectories, output_filename='concentration_pl
     ax2.tick_params(axis='y', which='major', labelsize=8, colors=TEXT_COLOR)
     ax2.set_xlim([time_steps[0], time_steps[-1]])
     
-    plt.tight_layout()
+    # Note: Skip tight_layout() as it conflicts with gridspec. bbox_inches='tight' handles spacing.
     plt.savefig(output_filename, dpi=150, bbox_inches='tight', facecolor=BG_COLOR, edgecolor='none')
     print(f"Concentration plot saved to {output_filename}")
     plt.close()
@@ -231,7 +264,7 @@ def plot_all_projections(trajectories, simulation_volume_size, masks_nucleus, ma
     # Plot particles in 3D
     if len(protein_pos) > 0:
         ax3d.scatter(protein_pos[:, 0], protein_pos[:, 1], protein_pos[:, 2], 
-                     c='#64B5F6', s=4, alpha=0.7, label='Protein')
+                     c='#64B5F6', s=2, alpha=0.6, label='Protein')
     if len(rna_pos) > 0:
         ax3d.scatter(rna_pos[:, 0], rna_pos[:, 1], rna_pos[:, 2], 
                      c='#EF5350', s=4, alpha=0.9, label='RNA')
@@ -270,7 +303,7 @@ def plot_all_projections(trajectories, simulation_volume_size, masks_nucleus, ma
     cell_xy = create_cell_image(nucleus_xy, cytosol_xy)
     ax_xy.imshow(cell_xy.transpose(1, 0, 2), origin='upper', aspect='equal')
     if len(protein_pos) > 0:
-        ax_xy.scatter(protein_pos[:, 0], protein_pos[:, 1], c='#64B5F6', s=3, alpha=0.7)
+        ax_xy.scatter(protein_pos[:, 0], protein_pos[:, 1], c='#64B5F6', s=1, alpha=0.5)
     if len(rna_pos) > 0:
         ax_xy.scatter(rna_pos[:, 0], rna_pos[:, 1], c='#EF5350', s=3, alpha=0.9)
     if transcription_site is not None:
@@ -283,7 +316,7 @@ def plot_all_projections(trajectories, simulation_volume_size, masks_nucleus, ma
     cell_xz = create_cell_image(nucleus_xz, cytosol_xz)
     ax_xz.imshow(cell_xz.transpose(1, 0, 2), origin='lower', aspect='equal')
     if len(protein_pos) > 0:
-        ax_xz.scatter(protein_pos[:, 0], protein_pos[:, 2], c='#64B5F6', s=3, alpha=0.7)
+        ax_xz.scatter(protein_pos[:, 0], protein_pos[:, 2], c='#64B5F6', s=1, alpha=0.5)
     if len(rna_pos) > 0:
         ax_xz.scatter(rna_pos[:, 0], rna_pos[:, 2], c='#EF5350', s=3, alpha=0.9)
     if transcription_site is not None:
@@ -296,7 +329,7 @@ def plot_all_projections(trajectories, simulation_volume_size, masks_nucleus, ma
     cell_yz = create_cell_image(nucleus_yz, cytosol_yz)
     ax_yz.imshow(cell_yz.transpose(1, 0, 2), origin='lower', aspect='equal')
     if len(protein_pos) > 0:
-        ax_yz.scatter(protein_pos[:, 1], protein_pos[:, 2], c='#64B5F6', s=3, alpha=0.7)
+        ax_yz.scatter(protein_pos[:, 1], protein_pos[:, 2], c='#64B5F6', s=1, alpha=0.5)
     if len(rna_pos) > 0:
         ax_yz.scatter(rna_pos[:, 1], rna_pos[:, 2], c='#EF5350', s=3, alpha=0.9)
     if transcription_site is not None:
@@ -316,7 +349,7 @@ def plot_all_projections(trajectories, simulation_volume_size, masks_nucleus, ma
 
 def generate_temporal_gif(trajectories, simulation_volume_size, masks_nucleus, masks_cytosol,
                           transcription_site=None, output_filename='simulation.gif', fps=5,
-                          skip_frames=1, dpi=80, show_surfaces=True):
+                          skip_frames=1, dpi=80, show_surfaces=True, surface_decimation=4):
     """
     Generate animated GIF showing temporal evolution of particles in 3D.
     
@@ -342,6 +375,9 @@ def generate_temporal_gif(trajectories, simulation_volume_size, masks_nucleus, m
         DPI for GIF frames (lower = smaller file, faster generation)
     show_surfaces : bool
         If True, render 3D cell surfaces (slower). If False, only show particles (faster).
+    surface_decimation : int
+        Downsample factor for surface meshes (1=full resolution, 4=4x fewer polygons).
+        Higher values = faster rendering but blockier surfaces.
     """
     try:
         import imageio
@@ -366,18 +402,34 @@ def generate_temporal_gif(trajectories, simulation_volume_size, masks_nucleus, m
     cytosol_verts, cytosol_faces = None, None
     
     if show_surfaces:
+        # Apply decimation by downsampling the mask
+        decimation = max(1, int(surface_decimation))
+        
         try:
-            nucleus_verts, nucleus_faces, _, _ = measure.marching_cubes(masks_nucleus, level=0.5)
+            # Downsample mask for faster marching cubes
+            if decimation > 1:
+                mask_decimated = masks_nucleus[::decimation, ::decimation, ::decimation]
+            else:
+                mask_decimated = masks_nucleus
+            nucleus_verts, nucleus_faces, _, _ = measure.marching_cubes(mask_decimated, level=0.5)
+            # Scale vertices back to original coordinate system
+            nucleus_verts = nucleus_verts * decimation
         except:
             pass
         
         try:
-            cytosol_verts, cytosol_faces, _, _ = measure.marching_cubes(masks_cytosol, level=0.5)
+            if decimation > 1:
+                mask_decimated = masks_cytosol[::decimation, ::decimation, ::decimation]
+            else:
+                mask_decimated = masks_cytosol
+            cytosol_verts, cytosol_faces, _, _ = measure.marching_cubes(mask_decimated, level=0.5)
+            # Scale vertices back to original coordinate system
+            cytosol_verts = cytosol_verts * decimation
         except:
             pass
     
     # Generate frames
-    surface_mode = "with surfaces" if show_surfaces else "particles only (fast)"
+    surface_mode = f"with surfaces (decim={surface_decimation})" if show_surfaces else "particles only (fast)"
     print(f"Generating {len(time_steps_to_render)} frames for GIF ({surface_mode}, skip={skip_frames}, dpi={dpi})...")
     frames = []
     
@@ -418,7 +470,7 @@ def generate_temporal_gif(trajectories, simulation_volume_size, masks_nucleus, m
         # Plot particles
         if len(protein_pos) > 0:
             ax.scatter(protein_pos[:, 0], protein_pos[:, 1], protein_pos[:, 2],
-                      c=PROTEIN_COLOR, s=4, alpha=0.7, label=f'Protein ({len(protein_pos)})')
+                      c=PROTEIN_COLOR, s=2, alpha=0.6, label=f'Protein ({len(protein_pos)})')
         if len(rna_pos) > 0:
             ax.scatter(rna_pos[:, 0], rna_pos[:, 1], rna_pos[:, 2],
                       c=RNA_COLOR, s=4, alpha=0.9, label=f'RNA ({len(rna_pos)})')

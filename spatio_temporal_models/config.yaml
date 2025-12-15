@@ -9,13 +9,26 @@
 kinetics:
   k_on: 0.2              # Transcription site activation rate
   k_off: 0.1             # Transcription site deactivation rate
-  k_r: 3.0               # RNA production rate (when TS is ON)
-  gamma_r: 0.05          # RNA degradation rate
-  k_p: 0.2               # Protein production rate (per cytoplasmic RNA)
-  gamma_p: 0.65          # Protein degradation rate
-  k_diff_r: 10.0         # RNA diffusion coefficient
-  k_diff_p: 10.0         # Protein diffusion coefficient
+  k_r: 3.0               # RNA initiation rate (when TS is ON)
+  k_p: 0.2               # Protein translation initiation rate (per cytoplasmic RNA)
+
   transport_rate: 2.0    # Nuclear export rate (for RNA near envelope)
+
+  gamma_p: 0.03          # Protein degradation rate 
+  gamma_r: 0.03          # RNA degradation rate
+
+
+  # Diffusion coefficients
+  k_diff_r: 7.0         # RNA diffusion coefficient
+  k_diff_p: 7.0         # Protein diffusion coefficient
+
+# Elongation Times (NEW)
+# ----------------------
+# Time required for synthesis to complete (deterministic)
+
+elongation:
+  RNA_elongation_time: 2.0       # Seconds to synthesize one RNA (polymerase elongation)
+  Protein_elongation_time: 2.0   # Seconds to synthesize one protein (ribosome elongation)
 
 # Cell Geometry (in pixels)
 # -------------------------
@@ -31,11 +44,15 @@ geometry:
 
 # Simulation Settings
 # -------------------
+# total_time is the RECORDED time (what you see in plots)
+# burnin_time is added BEFORE recording (for reaching steady state)
+# Actual simulation runs for: total_time + burnin_time
 
 simulation:
-  total_time: 100        # Total simulation time (seconds)
-  frame_rate: 1          # Save state every N seconds
-  burnin_time: 0         # Time before recording starts (seconds)
+  total_time: 1800        # Recorded time (seconds) - this is what appears in plots
+  frame_rate: 5           # Save state every N seconds
+  burnin_time: 2000       # Equilibration time before recording (not shown in output)
+  random_seed: 42         # Random seed for reproducibility (remove or set to null for random)
 
 # Transcription Site Options
 # --------------------------
@@ -62,9 +79,10 @@ drug:
 # ---------------
 
 output:
-  generate_gif: true            # Generate animated GIF of temporal evolution
+  generate_gif: false           # Generate animated GIF of temporal evolution
   gif_fps: 4                    # Frames per second for GIF animation
-  gif_skip_frames: 4            # Only render every Nth frame (1=all, 5=every 5th)
+  gif_skip_frames: 2            # Only render every Nth frame (1=all, 5=every 5th)
   gif_dpi: 80                   # DPI for GIF frames (lower = smaller file)
-  gif_show_surfaces: false      # Show cell surfaces (SLOW - disable for faster generation)
-
+  gif_show_surfaces: true       # Show cell surfaces (SLOW - disable for faster generation)
+  gif_surface_decimation: 4     # Downsample surfaces by this factor (1=full, 4=4x faster)
+  show_nascent_separately: true # Show nascent molecules with different colors

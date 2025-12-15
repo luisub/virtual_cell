@@ -45,11 +45,11 @@ class SimulationParameters:
     nucleus_xy_offset : List[int]
         Nucleus center offset from box center [X, Y] in pixels
     total_time : float
-        Total simulation time in seconds
+        Recorded simulation time in seconds (appears in output plots)
     frame_rate : float
         State save interval in seconds
     burnin_time : float
-        Time before recording starts in seconds
+        Equilibration time before recording starts (added to total_time internally)
     position_TS : str
         Transcription site position: 'center' or 'random'
     movement_protein_into_nucleus : bool
@@ -73,6 +73,10 @@ class SimulationParameters:
     k_diff_p: float = 10.0
     transport_rate: float = 2.0
     
+    # Elongation times (deterministic)
+    RNA_elongation_time: float = 60.0       # Seconds to synthesize one RNA
+    Protein_elongation_time: float = 30.0   # Seconds to synthesize one protein
+    
     # Geometry
     simulation_volume_size: List[int] = field(default_factory=lambda: [512, 512, 100])
     cytosol_size: List[int] = field(default_factory=lambda: [350, 350, 80])
@@ -83,6 +87,7 @@ class SimulationParameters:
     total_time: float = 100.0
     frame_rate: float = 1.0
     burnin_time: float = 0.0
+    random_seed: int = None  # Random seed for reproducibility (None = random)
     
     # Options
     position_TS: str = 'random'
@@ -96,9 +101,11 @@ class SimulationParameters:
     # Output options
     generate_gif: bool = False
     gif_fps: int = 5
-    gif_skip_frames: int = 1      # Render every Nth frame
-    gif_dpi: int = 80             # DPI for GIF frames
-    gif_show_surfaces: bool = True  # Show cell surfaces in GIF (slower)
+    gif_skip_frames: int = 1              # Render every Nth frame
+    gif_dpi: int = 80                     # DPI for GIF frames
+    gif_show_surfaces: bool = True        # Show cell surfaces in GIF (slower)
+    gif_surface_decimation: int = 4       # Downsample surfaces by this factor
+    show_nascent_separately: bool = True  # Show nascent molecules with different colors
     
     def __post_init__(self):
         """Validate parameters after initialization."""
@@ -156,6 +163,12 @@ class SimulationParameters:
         if self.burnin_time < 0:
             errors.append(f"burnin_time must be non-negative, got {self.burnin_time}")
         
+        # Check elongation time parameters
+        if self.RNA_elongation_time < 0:
+            errors.append(f"RNA_elongation_time must be non-negative, got {self.RNA_elongation_time}")
+        if self.Protein_elongation_time < 0:
+            errors.append(f"Protein_elongation_time must be non-negative, got {self.Protein_elongation_time}")
+        
         # Check position_TS
         if self.position_TS not in ['center', 'random']:
             errors.append(f"position_TS must be 'center' or 'random', got '{self.position_TS}'")
@@ -179,6 +192,8 @@ class SimulationParameters:
             'k_diff_r': self.k_diff_r,
             'k_diff_p': self.k_diff_p,
             'transport_rate': self.transport_rate,
+            'RNA_elongation_time': self.RNA_elongation_time,
+            'Protein_elongation_time': self.Protein_elongation_time,
             'simulation_volume_size': list(self.simulation_volume_size),
             'cytosol_size': list(self.cytosol_size),
             'nucleus_size': list(self.nucleus_size),
@@ -186,6 +201,7 @@ class SimulationParameters:
             'total_time': self.total_time,
             'frame_rate': self.frame_rate,
             'burnin_time': self.burnin_time,
+            'random_seed': self.random_seed,
             'position_TS': self.position_TS,
             'movement_protein_into_nucleus': self.movement_protein_into_nucleus,
             'apply_drug': self.apply_drug,
@@ -196,6 +212,8 @@ class SimulationParameters:
             'gif_skip_frames': self.gif_skip_frames,
             'gif_dpi': self.gif_dpi,
             'gif_show_surfaces': self.gif_show_surfaces,
+            'gif_surface_decimation': self.gif_surface_decimation,
+            'show_nascent_separately': self.show_nascent_separately,
         }
     
     @classmethod
@@ -214,6 +232,10 @@ class SimulationParameters:
         # Kinetics
         if 'kinetics' in config:
             params.update(config['kinetics'])
+        
+        # Elongation times
+        if 'elongation' in config:
+            params.update(config['elongation'])
         
         # Geometry
         if 'geometry' in config:
@@ -254,6 +276,10 @@ class SimulationParameters:
                 params['gif_dpi'] = config['output']['gif_dpi']
             if 'gif_show_surfaces' in config['output']:
                 params['gif_show_surfaces'] = config['output']['gif_show_surfaces']
+            if 'gif_surface_decimation' in config['output']:
+                params['gif_surface_decimation'] = config['output']['gif_surface_decimation']
+            if 'show_nascent_separately' in config['output']:
+                params['show_nascent_separately'] = config['output']['show_nascent_separately']
         
         return cls(**params)
 
@@ -261,6 +287,11 @@ class SimulationParameters:
 
 class GeneExpressionSimulator:
     def __init__(self, params):
+        # Set random seed for reproducibility (if provided)
+        random_seed = params.get('random_seed', None)
+        if random_seed is not None:
+            np.random.seed(random_seed)
+            
         self.TS_state = False  # Initial state of the Transcription Site (TS)
         self.RNAs = {}
         self.Proteins = {}
@@ -276,11 +307,6 @@ class GeneExpressionSimulator:
         # Nucleus positioning for half-ellipsoid cell morphology
         # Half-ellipsoid: nucleus sits on Z=0 (coverslip), center is at Z=0
         nucleus_xy_offset = params.get('nucleus_xy_offset', [0, 0])
-        self.nucleus_center = np.array([
-            center_of_box[0] + nucleus_xy_offset[0],
-            center_of_box[1] + nucleus_xy_offset[1],
-            0.0  # Half-ellipsoid center at Z=0 (coverslip surface)
-        ])
         
         self.nucleus_mask = np.zeros(simulation_volume_size, dtype=bool)
         self.cytosol_mask = np.zeros(simulation_volume_size, dtype=bool)
@@ -289,29 +315,7 @@ class GeneExpressionSimulator:
         # Set rates early so is_within_nucleus can use them
         self.rates = params.copy()
         
-        if params['position_TS'] == 'center':
-            self.transcription_site = self.nucleus_center.copy()
-        else:
-            self.transcription_site = self.find_random_TS_position_inside_nucleus()
-            
-        self.RNA_trajectories = {}
-        self.Protein_trajectories = {}
-        self.frame_rate = params['frame_rate']
-        self.time_steps = []
-        self.TS_trajectory = []
-        self.transport_rate = params['transport_rate']
-        self.small_distance_outside_nucleus = 1
-        self.transport_zone_threshold = 2
-        self.movement_protein_into_nucleus = params['movement_protein_into_nucleus']
-        self.burnin_time = params.get('burnin_time', 0)
-        self.next_save_time = self.burnin_time
-        self.total_time = params['total_time'] + self.burnin_time
-        self.drug_application_time = params['drug_application_time'] + self.burnin_time
-        self.inhibited_parameters = params['inhibited_parameters']
-        self.apply_drug = params['apply_drug']
-        self.parameters_updated = False
-        
-        # Initialize half-ellipsoid attributes for boundary checking
+        # Initialize half-ellipsoid attributes for boundary checking (MUST be before TS placement)
         cytosol_radii = np.array(params['cytosol_size']) / 2
         nucleus_radii = np.array(params['nucleus_size']) / 2
         
@@ -327,6 +331,44 @@ class GeneExpressionSimulator:
             0
         ])
         self.nucleus_center = self._nucleus_center
+        
+        # Transport zone threshold and shrunk radii (for performance)
+        self.transport_zone_threshold = 2
+        shrunk_size = np.array(params['nucleus_size']) - 2 * self.transport_zone_threshold
+        shrunk_size = np.clip(shrunk_size, a_min=self.transport_zone_threshold, a_max=None)
+        self._shrunk_radii = shrunk_size / 2
+        
+        # Now we can place the transcription site
+        if params['position_TS'] == 'center':
+            # Place TS at geometric center of the nucleus dome (halfway up in Z)
+            nucleus_radius_z = params['nucleus_size'][2] / 2
+            self.transcription_site = np.array([
+                self.nucleus_center[0],
+                self.nucleus_center[1],
+                nucleus_radius_z / 2  # Center of the dome, not at Z=0
+            ])
+        else:
+            self.transcription_site = self.find_random_TS_position_inside_nucleus()
+            
+        self.RNA_trajectories = {}
+        self.Protein_trajectories = {}
+        self.frame_rate = params['frame_rate']
+        self.time_steps = []
+        self.TS_trajectory = []
+        self.transport_rate = params['transport_rate']
+        self.small_distance_outside_nucleus = 1
+        self.movement_protein_into_nucleus = params['movement_protein_into_nucleus']
+        self.burnin_time = params.get('burnin_time', 0)
+        self.next_save_time = self.burnin_time
+        self.total_time = params['total_time'] + self.burnin_time
+        self.drug_application_time = params['drug_application_time'] + self.burnin_time
+        self.inhibited_parameters = params['inhibited_parameters']
+        self.apply_drug = params['apply_drug']
+        self.parameters_updated = False
+        
+        # Elongation times (deterministic)
+        self.RNA_elongation_time = params.get('RNA_elongation_time', 60.0)
+        self.Protein_elongation_time = params.get('Protein_elongation_time', 30.0)
         
     def update_rates_with_drug_effect(self):
         for param, value in self.inhibited_parameters.items():
@@ -362,32 +404,33 @@ class GeneExpressionSimulator:
         return nucleus_center.copy()
         
     def save_state(self, current_time):
-        current_time_int = int(current_time - self.burnin_time)  # Adjust time to start from 0 after burnin
-        self.time_steps.append(current_time_int)
+        # Adjust time to start from 0 after burnin, round to 2 decimal places for precision
+        adjusted_time = round(current_time - self.burnin_time, 2)
+        self.time_steps.append(adjusted_time)
         
         for rna_id, rna_info in self.RNAs.items():
             if rna_id not in self.RNA_trajectories:
                 self.RNA_trajectories[rna_id] = []
             rna_snapshot = rna_info.copy()
-            rna_snapshot['time'] = current_time_int
+            rna_snapshot['time'] = adjusted_time
             rna_snapshot['id'] = rna_id
-            rna_snapshot['position'] = self.RNAs[rna_id]['position']
+            # Position is already in rna_info, no need to copy again
             self.RNA_trajectories[rna_id].append(rna_snapshot)
         
         for protein_id, protein_info in self.Proteins.items():
             if protein_id not in self.Protein_trajectories:
                 self.Protein_trajectories[protein_id] = []
             protein_snapshot = protein_info.copy()
-            protein_snapshot['time'] = current_time_int
+            protein_snapshot['time'] = adjusted_time
             protein_snapshot['id'] = protein_id
-            protein_snapshot['position'] = self.Proteins[protein_id]['position']
+            # Position is already in protein_info, no need to copy again
             self.Protein_trajectories[protein_id].append(protein_snapshot)
         
         # For the transcription site, if it also has an 'id', include it as well
         TS_info = {
             'position': self.transcription_site.tolist(),
             'state': self.TS_state,
-            'time': current_time_int
+            'time': adjusted_time
         }
         self.TS_trajectory.append(TS_info)
     
@@ -406,56 +449,48 @@ class GeneExpressionSimulator:
             np.linspace(0, self.simulation_volume_size[2] - 1, self.simulation_volume_size[2]),
             indexing='ij')
         
-        # Cytosol: half-ellipsoid (dome) sitting on Z=0
-        cytosol_radii = np.array(self.rates['cytosol_size']) / 2
-        cytosol_center = np.array([self.center_of_box[0], self.center_of_box[1], 0])
-        
         positions = np.stack((x, y, z), axis=-1)
-        normalized_sq_dist_cytosol = np.sum(((positions - cytosol_center) / cytosol_radii)**2, axis=-1)
-        # Upper half: z >= 0 AND within ellipsoid
+        
+        # Cytosol: half-ellipsoid (dome) sitting on Z=0 (use pre-computed values)
+        normalized_sq_dist_cytosol = np.sum(((positions - self._cytosol_center) / self._cytosol_radii)**2, axis=-1)
         self.cytosol_mask = (normalized_sq_dist_cytosol <= 1) & (z >= 0)
         
-        # Nucleus: half-ellipsoid sitting on Z=0, offset in XY if specified
-        nucleus_radii = np.array(self.rates['nucleus_size']) / 2
-        nucleus_xy_offset = self.rates.get('nucleus_xy_offset', [0, 0])
-        nucleus_center = np.array([
-            self.center_of_box[0] + nucleus_xy_offset[0],
-            self.center_of_box[1] + nucleus_xy_offset[1],
-            0
-        ])
-        self.nucleus_center = nucleus_center
-        
-        normalized_sq_dist_nucleus = np.sum(((positions - nucleus_center) / nucleus_radii)**2, axis=-1)
-        # Upper half: z >= 0 AND within ellipsoid
+        # Nucleus: half-ellipsoid sitting on Z=0 (use pre-computed values)
+        normalized_sq_dist_nucleus = np.sum(((positions - self._nucleus_center) / self._nucleus_radii)**2, axis=-1)
         self.nucleus_mask = (normalized_sq_dist_nucleus <= 1) & (z >= 0)
         
         # Remove nucleus from cytosol
         self.cytosol_mask &= ~self.nucleus_mask
-        
-        # Store for boundary checking
-        self._cytosol_radii = cytosol_radii
-        self._cytosol_center = cytosol_center
-        self._nucleus_radii = nucleus_radii
-        self._nucleus_center = nucleus_center  
 
     def is_within_nucleus(self, entity=None, pos=None, nucleus_diameter=None):
-        """Check if position is within nucleus (half-ellipsoid)."""
+        """Check if position is within nucleus (half-ellipsoid).
+        
+        Optimized: Uses pure Python math for single point operations.
+        """
         if entity is not None:
-            pos = np.array(entity['position'][:3])
-            nucleus_size = np.array(self.rates['nucleus_size']) / 2
+            p = entity['position']
+            rx, ry, rz = self._nucleus_radii
         else:
-            pos = np.array(pos[:3])
-            nucleus_size = nucleus_diameter / 2
-        nucleus_center = self.nucleus_center
-        normalized_sq_dist = np.sum(((pos - nucleus_center) / nucleus_size) ** 2)
+            p = pos
+            rx, ry, rz = nucleus_diameter[0]/2, nucleus_diameter[1]/2, nucleus_diameter[2]/2
+        
+        cx, cy, cz = self._nucleus_center
+        dx, dy, dz = p[0] - cx, p[1] - cy, p[2] - cz
+        normalized_sq_dist = (dx/rx)**2 + (dy/ry)**2 + (dz/rz)**2
         # Half-ellipsoid: require Z >= 0
-        return (normalized_sq_dist <= 1) and (pos[2] >= 0)
+        return (normalized_sq_dist <= 1) and (p[2] >= 0)
     
     def is_within_cytosol(self, entity):
-        """Check if entity is within cytosol (half-ellipsoid)."""
-        pos = np.array(entity['position'][:3])
-        normalized_sq_dist = np.sum(((pos - self._cytosol_center) / self._cytosol_radii) ** 2)
-        is_in_cytosol = (normalized_sq_dist <= 1) and (pos[2] >= 0)
+        """Check if entity is within cytosol (half-ellipsoid).
+        
+        Optimized: Uses pure Python math for single point operations.
+        """
+        p = entity['position']
+        cx, cy, cz = self._cytosol_center
+        rx, ry, rz = self._cytosol_radii
+        dx, dy, dz = p[0] - cx, p[1] - cy, p[2] - cz
+        normalized_sq_dist = (dx/rx)**2 + (dy/ry)**2 + (dz/rz)**2
+        is_in_cytosol = (normalized_sq_dist <= 1) and (p[2] >= 0)
         return is_in_cytosol and not self.is_within_nucleus(entity)
     
     def move_particle(self, entity, rate):
@@ -484,72 +519,135 @@ class GeneExpressionSimulator:
         return entity
     
     def is_near_nuclear_envelope(self, rna_position):
-        """Check if RNA is near nuclear envelope (transport zone)."""
-        nucleus_size = np.array(self.rates['nucleus_size'])
-        shrunk_nucleus_size = nucleus_size - 2 * self.transport_zone_threshold
-        shrunk_nucleus_size = np.clip(shrunk_nucleus_size, a_min=self.transport_zone_threshold, a_max=None)
-        pos = np.array(rna_position[:3])
-        nucleus_center = self.nucleus_center
+        """Check if RNA is near nuclear envelope (transport zone).
         
-        # Within actual nucleus
-        within_nucleus = np.sum(((pos - nucleus_center) ** 2) / ((nucleus_size / 2) ** 2)) <= 1
-        # Outside shrunk nucleus (inner boundary)
-        outside_shrunk = np.sum(((pos - nucleus_center) ** 2) / ((shrunk_nucleus_size / 2) ** 2)) > 1
-        return within_nucleus and outside_shrunk
+        Optimized: Uses pre-computed values and pure Python math.
+        """
+        # Use pre-computed values from __init__
+        pos = rna_position if isinstance(rna_position, (list, tuple)) else rna_position[:3]
+        
+        # Calculate normalized squared distance for outer boundary
+        dx = pos[0] - self._nucleus_center[0]
+        dy = pos[1] - self._nucleus_center[1]
+        dz = pos[2] - self._nucleus_center[2]
+        
+        # Outer boundary check (within nucleus)
+        outer_dist_sq = (dx / self._nucleus_radii[0])**2 + \
+                        (dy / self._nucleus_radii[1])**2 + \
+                        (dz / self._nucleus_radii[2])**2
+        within_nucleus = outer_dist_sq <= 1
+        
+        # Inner boundary check (outside shrunk nucleus = in transport zone)
+        inner_dist_sq = (dx / self._shrunk_radii[0])**2 + \
+                        (dy / self._shrunk_radii[1])**2 + \
+                        (dz / self._shrunk_radii[2])**2
+        in_transport_zone = inner_dist_sq > 1
+        
+        return within_nucleus and in_transport_zone
 
     def calculate_rates_and_reactions(self):
+        """Calculate reaction rates based on current state.
+        
+        Key changes for elongation model:
+        - Nascent RNAs cannot move, transport, or initiate translation
+        - Only mature cytoplasmic RNAs can initiate protein translation
+        - Nascent proteins cannot move (attached to parent RNA)
+        """
         rates = []
         reactions = []
+        
+        # Transcription site switching
         if not self.TS_state:
             rates.append(self.rates['k_on'])
             reactions.append(('TS_on', None))
         else:
             rates.append(self.rates['k_off'])
             reactions.append(('TS_off', None))
+            # RNA initiation (produces nascent RNA)
             rates.append(self.rates['k_r'])
-            reactions.append(('produce_RNA', None))
+            reactions.append(('initiate_RNA', None))
+        
+        # RNA reactions
         for rna_id, rna_info in self.RNAs.items():
+            # Degradation applies to all RNAs
             rates.append(self.rates['gamma_r'])
             reactions.append(('degrade_RNA', rna_id))
-            rates.append(self.rates['k_diff_r'])
-            reactions.append(('move_RNA', rna_id))
-            if rna_info['in_cytosol']:
-                rates.append(self.rates['k_p'])
-                reactions.append(('produce_Protein', rna_id))
-            if not rna_info['in_cytosol'] and self.is_near_nuclear_envelope(np.array(rna_info['position'])):
-                rates.append(self.rates['transport_rate'])
-                reactions.append(('transport_RNA_to_cytosol', rna_id))
-        for protein_id in self.Proteins.keys():
+            
+            # Only MATURE RNAs can move
+            if rna_info.get('state', 'mature') == 'mature':
+                rates.append(self.rates['k_diff_r'])
+                reactions.append(('move_RNA', rna_id))
+                
+                # Only MATURE cytoplasmic RNAs can initiate translation
+                if rna_info['in_cytosol']:
+                    rates.append(self.rates['k_p'])
+                    reactions.append(('initiate_Protein', rna_id))
+                
+                # Only MATURE nuclear RNAs can be transported
+                if not rna_info['in_cytosol'] and self.is_near_nuclear_envelope(rna_info['position']):
+                    rates.append(self.rates['transport_rate'])
+                    reactions.append(('transport_RNA_to_cytosol', rna_id))
+        
+        # Protein reactions
+        for protein_id, protein_info in self.Proteins.items():
+            # Degradation applies to all proteins
             rates.append(self.rates['gamma_p'])
             reactions.append(('degrade_Protein', protein_id))
-            rates.append(self.rates['k_diff_p'])
-            reactions.append(('move_Protein', protein_id))
+            
+            # Only MATURE proteins can move independently
+            if protein_info.get('state', 'mature') == 'mature':
+                rates.append(self.rates['k_diff_p'])
+                reactions.append(('move_Protein', protein_id))
+        
         return rates, reactions
 
     def execute_reaction(self, reaction, current_time):
+        """Execute a single reaction.
+        
+        Elongation model changes:
+        - initiate_RNA: Creates NASCENT RNA with completion_time
+        - initiate_Protein: Creates NASCENT protein with parent_rna_id and completion_time
+        - degrade_RNA: Also degrades any attached nascent proteins
+        """
         reaction_type, entity_id = reaction
+        
         if reaction_type == 'TS_off':
             self.TS_state = False
         elif reaction_type == 'TS_on':
             self.TS_state = True
         
-        elif reaction_type == 'produce_RNA':
-            # Assuming transcription site is the initial position for RNA
+        elif reaction_type == 'initiate_RNA':
+            # Create NASCENT RNA at transcription site (cannot move until mature)
             new_rna = {
                 'id': self.next_rna_id,
                 'position': self.transcription_site.tolist(),
                 'in_cytosol': False,
                 'entity_type': 'RNA',
+                'state': 'nascent',  # NEW: nascent state
+                'completion_time': current_time + self.RNA_elongation_time,  # NEW: when it matures
                 'time': current_time,
             }
             self.RNAs[self.next_rna_id] = new_rna
             self.next_rna_id += 1
+            
         elif reaction_type == 'degrade_RNA' and entity_id in self.RNAs:
+            # Before deleting RNA, also delete any nascent proteins attached to it
+            proteins_to_delete = [
+                pid for pid, pinfo in self.Proteins.items()
+                if pinfo.get('state') == 'nascent' and pinfo.get('parent_rna_id') == entity_id
+            ]
+            for pid in proteins_to_delete:
+                del self.Proteins[pid]
+            # Now delete the RNA
             del self.RNAs[entity_id]
+            
         elif reaction_type == 'move_RNA':
             if entity_id in self.RNAs:
                 rna_info = self.RNAs[entity_id]
-                self.move_particle(rna_info, self.rates['k_diff_r'])
+                # Only move mature RNAs (double check, should already be filtered)
+                if rna_info.get('state', 'mature') == 'mature':
+                    self.move_particle(rna_info, self.rates['k_diff_r'])
+                    
         elif reaction_type == 'transport_RNA_to_cytosol':
             if entity_id in self.RNAs:
                 rna_info = self.RNAs[entity_id]
@@ -560,7 +658,12 @@ class GeneExpressionSimulator:
                 
                 # Direction vector points outward from nucleus center
                 direction_vector = np.array(rna_info['position'][:3]) - nucleus_center
-                direction_vector /= np.linalg.norm(direction_vector)
+                norm = np.linalg.norm(direction_vector)
+                if norm > 1e-10:  # Avoid division by zero
+                    direction_vector /= norm
+                else:
+                    # RNA is at nucleus center - default to upward direction
+                    direction_vector = np.array([0.0, 0.0, 1.0])
                 
                 # Calculate new position just outside the nucleus
                 new_position = nucleus_center + direction_vector * (nucleus_radius + self.small_distance_outside_nucleus)
@@ -578,24 +681,73 @@ class GeneExpressionSimulator:
                         new_position[2] = self.small_distance_outside_nucleus
                 
                 rna_info['position'] = new_position.tolist()
-        elif reaction_type == 'produce_Protein' and entity_id in self.RNAs:
-            # Proteins are produced at the RNA's current position
-            protein_info = self.RNAs[entity_id].copy()
-            if protein_info['in_cytosol']:  # Ensure Protein is produced only if RNA is in cytosol
+                
+        elif reaction_type == 'initiate_Protein' and entity_id in self.RNAs:
+            # Create NASCENT protein attached to parent RNA
+            rna_info = self.RNAs[entity_id]
+            if rna_info['in_cytosol'] and rna_info.get('state', 'mature') == 'mature':
                 new_protein = {
                     'id': self.next_protein_id,
-                    'position': protein_info['position'],
-                    'in_cytosol': True, # Proteins once produced are always in cytosol
+                    'position': rna_info['position'].copy() if isinstance(rna_info['position'], list) else rna_info['position'],
+                    'in_cytosol': True,
                     'entity_type': 'Protein',
+                    'state': 'nascent',  # NEW: nascent state
+                    'parent_rna_id': entity_id,  # NEW: track parent RNA
+                    'completion_time': current_time + self.Protein_elongation_time,  # NEW: when it matures
                     'time': current_time,
                 }
                 self.Proteins[self.next_protein_id] = new_protein
-                self.next_protein_id += 1    
+                self.next_protein_id += 1
+                
         elif reaction_type == 'degrade_Protein' and entity_id in self.Proteins:
             del self.Proteins[entity_id]
+            
         elif reaction_type == 'move_Protein' and entity_id in self.Proteins:
-            # move_particle already handles boundary checking
-            self.move_particle(self.Proteins[entity_id], self.rates['k_diff_p'])
+            protein_info = self.Proteins[entity_id]
+            # Only move mature proteins (double check, should already be filtered)
+            if protein_info.get('state', 'mature') == 'mature':
+                self.move_particle(protein_info, self.rates['k_diff_p'])
+    
+    def check_maturations(self, current_time):
+        """Check if any nascent molecules should mature (deterministic elongation).
+        
+        Also synchronizes nascent protein positions with their parent RNA.
+        """
+        # Check nascent RNAs
+        for rna_id, rna_info in self.RNAs.items():
+            if rna_info.get('state') == 'nascent':
+                if current_time >= rna_info.get('completion_time', 0):
+                    rna_info['state'] = 'mature'
+                    # Remove completion_time field (no longer needed)
+                    if 'completion_time' in rna_info:
+                        del rna_info['completion_time']
+        
+        # Check nascent Proteins and sync their positions
+        proteins_to_delete = []
+        for protein_id, protein_info in self.Proteins.items():
+            if protein_info.get('state') == 'nascent':
+                parent_rna_id = protein_info.get('parent_rna_id')
+                
+                if parent_rna_id not in self.RNAs:
+                    # Parent RNA was degraded - degrade protein too
+                    proteins_to_delete.append(protein_id)
+                else:
+                    # Sync position with parent RNA
+                    parent_rna = self.RNAs[parent_rna_id]
+                    protein_info['position'] = parent_rna['position'].copy() if isinstance(parent_rna['position'], list) else list(parent_rna['position'])
+                    
+                    # Check if protein should mature
+                    if current_time >= protein_info.get('completion_time', 0):
+                        protein_info['state'] = 'mature'
+                        # Remove tracking fields (no longer needed)
+                        if 'completion_time' in protein_info:
+                            del protein_info['completion_time']
+                        if 'parent_rna_id' in protein_info:
+                            del protein_info['parent_rna_id']
+        
+        # Delete orphaned proteins
+        for pid in proteins_to_delete:
+            del self.Proteins[pid]
     
 
     def simulate(self):
@@ -614,6 +766,10 @@ class GeneExpressionSimulator:
                 # Determine the time until the next reaction occurs
                 time_step = np.random.exponential(1 / sum(rates))
                 current_time += time_step
+                
+            # Check for maturation of nascent molecules (deterministic elongation)
+            self.check_maturations(current_time)
+            
             # Update parameters if the drug application time has been reached and it's not already updated
             if (self.apply_drug==True) and (current_time >= self.drug_application_time) and (self.parameters_updated==False):
                 self.update_rates_with_drug_effect()
@@ -676,7 +832,8 @@ if __name__ == "__main__":
     print("Simulation finished.")
     
     print("Plotting molecule concentrations...")
-    plot_molecule_concentrations(results, output_filename='concentration_plot.png')
+    plot_molecule_concentrations(results, output_filename='concentration_plot.png',
+                                  show_nascent_separately=params.get('show_nascent_separately', True))
     
     print("Plotting all projections (XY, XZ, YZ)...")
     plot_all_projections(results, params['simulation_volume_size'], results['nucleus_mask'], results['cytosol_mask'],
@@ -695,5 +852,6 @@ if __name__ == "__main__":
             fps=params.get('gif_fps', 5),
             skip_frames=params.get('gif_skip_frames', 1),
             dpi=params.get('gif_dpi', 80),
-            show_surfaces=params.get('gif_show_surfaces', True)
+            show_surfaces=params.get('gif_show_surfaces', True),
+            surface_decimation=params.get('gif_surface_decimation', 4)
         )
