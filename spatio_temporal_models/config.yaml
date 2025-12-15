@@ -9,7 +9,7 @@
 kinetics:
   k_on: 0.2              # Transcription site activation rate
   k_off: 0.1             # Transcription site deactivation rate
-  k_r: 3.0               # RNA initiation rate (when TS is ON)
+  k_r: 2.0               # RNA initiation rate (when TS is ON)
   k_p: 0.2               # Protein translation initiation rate (per cytoplasmic RNA)
 
   transport_rate: 2.0    # Nuclear export rate (for RNA near envelope)
@@ -19,8 +19,8 @@ kinetics:
 
 
   # Diffusion coefficients
-  k_diff_r: 7.0         # RNA diffusion coefficient
-  k_diff_p: 7.0         # Protein diffusion coefficient
+  k_diff_r: 2.0         # RNA diffusion coefficient
+  k_diff_p: 2.0         # Protein diffusion coefficient
 
 # Elongation Times (NEW)
 # ----------------------
@@ -51,7 +51,7 @@ geometry:
 simulation:
   total_time: 1800        # Recorded time (seconds) - this is what appears in plots
   frame_rate: 5           # Save state every N seconds
-  burnin_time: 2000       # Equilibration time before recording (not shown in output)
+  burnin_time: 10       # Equilibration time before recording (not shown in output)
   random_seed: 42         # Random seed for reproducibility (remove or set to null for random)
 
 # Transcription Site Options
@@ -86,3 +86,79 @@ output:
   gif_show_surfaces: true       # Show cell surfaces (SLOW - disable for faster generation)
   gif_surface_decimation: 4     # Downsample surfaces by this factor (1=full, 4=4x faster)
   show_nascent_separately: true # Show nascent molecules with different colors
+
+# =============================================================================
+# Microscopy Image Simulation
+# =============================================================================
+# Parameters for generating synthetic fluorescence microscopy images
+
+microscopy:
+  # Image Dimensions
+  image_size_yx: [512, 512]     # [Y, X] pixels (rows, cols)
+  num_z_slices: 12              # Number of Z slices in stack
+  
+  # Physical Parameters (for metadata)
+  voxel_size_yx_nm: 130.0       # Pixel size in XY (nanometers)
+  voxel_size_z_nm: 300.0        # Z-step size (nanometers)
+  # NOTE: time_interval uses simulation/frame_rate (NOT defined here to avoid duplication)
+  
+  # PSF (Point Spread Function) Parameters
+  psf:
+    sigma_xy: 1.2               # Lateral PSF width (pixels)
+    sigma_z: 2.0                # Axial PSF width (z-slice units)
+  
+  # Channel Amplitudes (signal intensity)
+  # Higher values = brighter spots = easier to detect
+  amplitudes:
+    # Channel 0: Transcription Site
+    ts_per_nascent_rna: 500.0   # Intensity per nascent RNA at TS
+    ts_min: 100.0               # Minimum TS intensity when active
+    ts_sigma_base: 2.0          # Base PSF sigma for TS
+    ts_sigma_per_rna: 0.3       # Additional sigma per nascent RNA
+    ts_size_function: 'sqrt'    # 'sqrt' or 'log' for size scaling
+    
+    # Channel 1: Mature RNA spots
+    mature_rna: 800.0           # Single RNA spot intensity (INCREASED from 300)
+    
+    # Channel 2: Nascent Protein spots
+    nascent_protein_per_chain: 400.0  # Intensity per nascent chain (INCREASED from 200)
+    
+    # Channel 3: Mature Protein (diffuse signal)
+    mature_protein_scale: 0.2   # Intensity per protein (INCREASED from 0.1)
+    mature_protein_blur_sigma: 15.0  # Blur to simulate diffusion
+  
+  # Baseline Intensities (camera offset / autofluorescence)
+  # NOTE: Hierarchy should be: background < cytosol < nucleus
+  baseline:
+    outside_cell: 100.0         # Background outside cell (lowest)
+    cytosol: 120.0              # Cytoplasmic autofluorescence (medium)
+    nucleus: 150.0              # Nuclear autofluorescence (highest)
+  
+  # Noise Parameters
+  noise:
+    read_noise_std: 5.0         # Gaussian read noise (camera)
+    shot_noise_enabled: true    # Enable Poisson shot noise
+    shot_noise_scale: 0.1       # Shot noise scaling factor
+    cellular_noise_amplitude: 10.0  # Spatially correlated texture
+    cellular_noise_sigma: 8.0   # Spatial correlation length (pixels)
+  
+  # Channel Names (for TIFF metadata)
+  channel_names:
+    - "TS"
+    - "Mature_RNA"
+    - "Nascent_Protein"
+    - "Mature_Protein"
+  
+  # Photobleaching (exponential decay)
+  # Decay rate k in s⁻¹: I(t) = I(t) * exp(-k * t)
+  # k=0.0 means no photobleaching (default)
+  # Typical range: 0.0001 to 0.01 s⁻¹ (rSNAPed uses 0.001 s⁻¹)
+  photobleaching:
+    channel_0_decay_rate: 0.001    # TS channel
+    channel_1_decay_rate: 0.001    # Mature RNA
+    channel_2_decay_rate: 0.001    # Nascent Protein
+    channel_3_decay_rate: 0.001    # Mature Protein
+  
+  # Random seed (null for random, or integer for reproducibility)
+  random_seed: 42
+
