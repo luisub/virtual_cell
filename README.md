@@ -22,8 +22,14 @@
 - **Spatial Modeling** — 2D and 3D particle tracking with diffusion and compartmentalization
 - **Nuclear Transport** — Models RNA transport through the nuclear envelope
 - **Drug Perturbations** — Simulate parameter changes at specified time points
-- **Synthetic Microscopy** — Generate realistic 2D microscopy images from simulations
-- **Particle Detection** — TrackPy integration for spot detection and analysis
+- **Synthetic Microscopy** — Generate realistic multi-channel microscopy images with:
+  - 4 channels: TS, Mature RNA, Nascent Protein, Mature Protein
+  - Configurable PSF (Point Spread Function)
+  - Realistic noise models (read noise, shot noise, cellular noise)
+  - Channel-dependent photobleaching (exponential decay)
+  - Configurable baseline intensities (background < cytosol < nucleus)
+- **Ground Truth Export** — CSV files with spot positions, intensities, and timing
+- **MicroLive Compatible** — TIFF output with OME metadata for downstream analysis
 
 ### Biological Model
 
@@ -48,14 +54,23 @@ Transcription          RNA Transport           Translation
 ```text
 virtual_cell/
 ├── src/
-│   └── imports.py              # Core simulation module
+│   └── imports.py                    # Core simulation module
 ├── notebooks/
-│   ├── constitutive.ipynb      # Constitutive gene expression examples
-│   ├── simulated_data.ipynb    # Synthetic microscopy data generation
-│   ├── fspExample.ipynb        # Finite State Projection examples
-│   └── Figure_4_*.ipynb        # Publication figures
+│   ├── constitutive.ipynb            # Constitutive gene expression examples
+│   ├── simulated_data.ipynb          # Synthetic microscopy data generation
+│   ├── fspExample.ipynb              # Finite State Projection examples
+│   └── Figure_4_*.ipynb              # Publication figures
 ├── spatio_temporal_models/
-│   └── simulated_cell_single.ipynb  # 2D/3D spatial simulation examples
+│   ├── microscopy_simulation.py      # Microscopy image simulator
+│   ├── minimal_simulation.py         # 3D Gillespie SSA simulator
+│   ├── plotting.py                   # Visualization utilities
+│   ├── config.yaml                   # Simulation configuration
+│   └── results_simulation/           # Output directory
+│       ├── simulated_microscopy.tif  # Multi-channel TIFF
+│       ├── mask_cytosol.tif          # Cytosol mask
+│       ├── mask_nucleus.tif          # Nucleus mask
+│       ├── ground_truth_*.csv        # Spot positions
+│       └── simulation_metadata.txt   # Parameter log
 ├── requirements.txt
 ├── LICENSE
 └── README.md
@@ -94,6 +109,7 @@ pip install -r requirements.txt
 | `numpy`, `scipy` | Numerical computing |
 | `matplotlib`, `seaborn` | Visualization |
 | `cellpose` | Deep learning-based cell segmentation |
+| `tifffile` | TIFF export with OME metadata |
 
 ---
 
@@ -150,6 +166,32 @@ plot_particle_positions(
     masks_cytosol=results['cytosol_mask'],
     simulation_type='3D'
 )
+```
+
+### Microscopy Simulator
+
+Generate realistic multi-channel microscopy images with ground truth:
+
+```bash
+cd spatio_temporal_models
+python microscopy_simulation.py
+```
+
+Configure parameters in `config.yaml`:
+
+```yaml
+simulation:
+  total_time: 1800        # Simulation duration (seconds)
+  frame_rate: 5           # Save every N seconds
+  
+microscopy:
+  photobleaching:
+    channel_0_decay_rate: 0.001  # Exponential decay (s⁻¹)
+    channel_1_decay_rate: 0.001
+  baseline:
+    outside_cell: 100.0   # Background intensity
+    cytosol: 120.0        # Cytoplasm intensity
+    nucleus: 150.0        # Nuclear intensity
 ```
 
 ---
