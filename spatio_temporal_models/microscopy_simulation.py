@@ -6,7 +6,7 @@ Microscopy Image Simulator
 
 Generates synthetic fluorescence microscopy data from biological simulation.
 
-This module takes the ground-truth particle states from minimal_simulation.py
+This module takes the ground-truth particle states from full_simulation.py
 and renders them as realistic microscopy images with:
 - 5D output: [T, Z, Y, X, C] where C=4 channels
 - PSF-convolved spots for TS, mature RNA, nascent proteins
@@ -31,8 +31,9 @@ from typing import Dict, List, Tuple, Optional, Any, Union
 from pathlib import Path
 from scipy.ndimage import gaussian_filter
 
-# Import the biology simulator
-from minimal_simulation import GeneExpressionSimulator, SimulationParameters
+# Import the biology simulators
+from full_simulation import GeneExpressionSimulator, SimulationParameters
+from simplified_simulation import SimplifiedGeneExpressionSimulator, SimplifiedSimulationParameters
 
 # Optional imports for saving
 try:
@@ -74,27 +75,31 @@ class MicroscopyParameters:
     psf_sigma_xy: float = 1.5          # Lateral PSF width
     psf_sigma_z: float = 3.0           # Axial PSF width (in z-slice units)
     
-    # Channel 0: Transcription Site
-    ts_amplitude_per_nascent_rna: float = 500.0
-    ts_sigma_base: float = 2.0
+    # SNR-Based Spot Intensities (relative to local background)
+    # Spot peak intensity = SNR × local_background_intensity
+    
+    # Channel 0: Transcription Site (ACCUMULATIVE)
+    # TS SNR = ts_snr_min + ts_snr_per_nascent_rna × nascent_count
+    ts_snr_min: float = 1.5             # Minimum SNR when TS active
+    ts_snr_per_nascent_rna: float = 0.5 # Additional SNR per nascent RNA
+    ts_sigma_base: float = 2.0          # Base PSF sigma for TS
     ts_sigma_per_nascent_rna: float = 0.3
-    ts_size_function: str = 'sqrt'     # 'sqrt' or 'log'
-    ts_min_amplitude: float = 100.0    # Minimum TS amplitude when active
+    ts_size_function: str = 'sqrt'      # 'sqrt' or 'log'
     
-    # Channel 1: Mature RNA (INCREASED for visibility)
-    mature_rna_amplitude: float = 800.0
+    # Channel 1: Mature RNA
+    mature_rna_snr: float = 2.5         # Peak = SNR × cytosol_intensity
     
-    # Channel 2: Nascent Protein (INCREASED for visibility)
-    nascent_protein_amplitude_per_chain: float = 400.0
+    # Channel 2: Nascent Protein (ACCUMULATIVE per ribosome)
+    nascent_protein_snr_per_chain: float = 1.5
     
-    # Channel 3: Mature Protein
-    mature_protein_scale: float = 0.2   # Intensity per protein (INCREASED)
-    mature_protein_blur_sigma: float = 15.0  # Blur sigma to make diffuse
+    # Channel 3: Mature Protein (diffuse signal)
+    mature_protein_snr_per_molecule: float = 0.002
+    mature_protein_blur_sigma: float = 15.0
     
-    # Baseline Intensities (camera offset / autofluorescence)
-    intensity_outside_cell: float = 100.0
-    intensity_cytosol: float = 120.0
-    intensity_nucleus: float = 110.0
+    # Baseline Intensities (realistic camera/autofluorescence)
+    intensity_outside_cell: float = 200.0
+    intensity_cytosol: float = 400.0
+    intensity_nucleus: float = 500.0
     
     # Noise Parameters
     read_noise_std: float = 5.0
@@ -135,6 +140,19 @@ class MicroscopyParameters:
             errors.append("image_size_yx dimensions must be >= 1")
         if errors:
             raise ValueError("Invalid microscopy parameters:\n  - " + "\n  - ".join(errors))
+    
+    def compute_spot_amplitude(self, snr: float, local_background: float) -> float:
+        """
+        Compute spot peak intensity from SNR and local background.
+        
+        Args:
+            snr: Signal-to-noise ratio (how many times brighter than background)
+            local_background: Local background intensity (e.g., cytosol or nucleus)
+            
+        Returns:
+            Spot peak intensity (snr × local_background)
+        """
+        return snr * local_background
     
     @classmethod
     def from_yaml(cls, config_path: str) -> 'MicroscopyParameters':
@@ -189,26 +207,29 @@ class MicroscopyParameters:
         if 'sigma_z' in psf:
             kwargs['psf_sigma_z'] = psf['sigma_z']
         
-        # Amplitudes
-        amp = micro.get('amplitudes', {})
-        if 'ts_per_nascent_rna' in amp:
-            kwargs['ts_amplitude_per_nascent_rna'] = amp['ts_per_nascent_rna']
-        if 'ts_min' in amp:
-            kwargs['ts_min_amplitude'] = amp['ts_min']
-        if 'ts_sigma_base' in amp:
-            kwargs['ts_sigma_base'] = amp['ts_sigma_base']
-        if 'ts_sigma_per_rna' in amp:
-            kwargs['ts_sigma_per_nascent_rna'] = amp['ts_sigma_per_rna']
-        if 'ts_size_function' in amp:
-            kwargs['ts_size_function'] = amp['ts_size_function']
-        if 'mature_rna' in amp:
-            kwargs['mature_rna_amplitude'] = amp['mature_rna']
-        if 'nascent_protein_per_chain' in amp:
-            kwargs['nascent_protein_amplitude_per_chain'] = amp['nascent_protein_per_chain']
-        if 'mature_protein_scale' in amp:
-            kwargs['mature_protein_scale'] = amp['mature_protein_scale']
-        if 'mature_protein_blur_sigma' in amp:
-            kwargs['mature_protein_blur_sigma'] = amp['mature_protein_blur_sigma']
+        # SNR parameters (replaces old amplitudes section)
+        snr = micro.get('snr', {})
+        if 'mature_rna' in snr:
+            kwargs['mature_rna_snr'] = snr['mature_rna']
+        if 'ts_min' in snr:
+            kwargs['ts_snr_min'] = snr['ts_min']
+        if 'ts_per_nascent_rna' in snr:
+            kwargs['ts_snr_per_nascent_rna'] = snr['ts_per_nascent_rna']
+        if 'nascent_protein_per_chain' in snr:
+            kwargs['nascent_protein_snr_per_chain'] = snr['nascent_protein_per_chain']
+        if 'mature_protein_per_molecule' in snr:
+            kwargs['mature_protein_snr_per_molecule'] = snr['mature_protein_per_molecule']
+        
+        # Spot size parameters (TS sigma, protein blur)
+        spot_size = micro.get('spot_size', {})
+        if 'ts_sigma_base' in spot_size:
+            kwargs['ts_sigma_base'] = spot_size['ts_sigma_base']
+        if 'ts_sigma_per_rna' in spot_size:
+            kwargs['ts_sigma_per_nascent_rna'] = spot_size['ts_sigma_per_rna']
+        if 'ts_size_function' in spot_size:
+            kwargs['ts_size_function'] = spot_size['ts_size_function']
+        if 'mature_protein_blur_sigma' in spot_size:
+            kwargs['mature_protein_blur_sigma'] = spot_size['mature_protein_blur_sigma']
         
         # Baseline intensities
         baseline = micro.get('baseline', {})
@@ -498,6 +519,9 @@ def render_ts_channel(
     The TS appears as a bright "bulb" whose intensity and size scale with
     the number of nascent RNAs being transcribed.
     
+    ACCUMULATIVE: TS SNR = snr_min + snr_per_rna × nascent_count
+                  Amplitude = SNR × nucleus_background
+    
     Args:
         image_3d: 3D array (Z, Y, X) to render onto
         ts_position_zyx: TS position in image coordinates (z, y, x)
@@ -510,11 +534,9 @@ def render_ts_channel(
     if nascent_rna_count <= 0:
         return image_3d
     
-    # Amplitude scales linearly with nascent RNA count
-    amplitude = max(
-        params.ts_min_amplitude,
-        params.ts_amplitude_per_nascent_rna * nascent_rna_count
-    )
+    # ACCUMULATIVE: SNR increases with nascent RNA count
+    snr = params.ts_snr_min + params.ts_snr_per_nascent_rna * nascent_rna_count
+    amplitude = params.compute_spot_amplitude(snr, params.intensity_nucleus)
     
     # Size scales with f(N) where f is sqrt or log
     if params.ts_size_function == 'sqrt':
@@ -540,6 +562,8 @@ def render_mature_rna_channel(
     """
     Render each mature RNA as a diffraction-limited Gaussian spot.
     
+    Amplitude = SNR × cytosol_background
+    
     Args:
         image_3d: 3D array (Z, Y, X) to render onto
         rna_positions_zyx: List of (z, y, x) positions in image coordinates
@@ -548,10 +572,16 @@ def render_mature_rna_channel(
     Returns:
         The modified image array
     """
+    # Compute amplitude from SNR and cytosol background
+    amplitude = params.compute_spot_amplitude(
+        params.mature_rna_snr, 
+        params.intensity_cytosol
+    )
+    
     for pos in rna_positions_zyx:
         render_gaussian_spot_3d(
             image_3d, pos,
-            amplitude=params.mature_rna_amplitude,
+            amplitude=amplitude,
             sigma_xy=params.psf_sigma_xy,
             sigma_z=params.psf_sigma_z
         )
@@ -566,6 +596,8 @@ def render_nascent_protein_channel(
 ) -> np.ndarray:
     """
     Render nascent protein signal at each translating RNA position.
+    
+    ACCUMULATIVE: Amplitude = (snr_per_chain × nascent_count) × cytosol_background
     
     Args:
         image_3d: 3D array (Z, Y, X) to render onto
@@ -582,7 +614,9 @@ def render_nascent_protein_channel(
         if n_nascent <= 0:
             continue
         
-        amplitude = params.nascent_protein_amplitude_per_chain * n_nascent
+        # ACCUMULATIVE: more ribosomes = brighter translation site
+        snr = params.nascent_protein_snr_per_chain * n_nascent
+        amplitude = params.compute_spot_amplitude(snr, params.intensity_cytosol)
         
         render_gaussian_spot_3d(
             image_3d, pos,
@@ -606,6 +640,8 @@ def render_mature_protein_channel(
     The signal is spread throughout the cytosol and blurred to appear
     as out-of-focus background, not as distinct spots.
     
+    Intensity = snr_per_molecule × count × cytosol_background
+    
     Args:
         image_3d: 3D array (Z, Y, X) to render onto
         mature_protein_count: Total number of mature proteins
@@ -618,8 +654,9 @@ def render_mature_protein_channel(
     if mature_protein_count <= 0:
         return image_3d
     
-    # Add intensity proportional to protein count within cytosol
-    intensity_boost = params.mature_protein_scale * mature_protein_count
+    # SNR-based intensity: snr_per_molecule × count × background
+    snr = params.mature_protein_snr_per_molecule * mature_protein_count
+    intensity_boost = params.compute_spot_amplitude(snr, params.intensity_cytosol)
     
     # Create a temporary layer for protein signal
     protein_layer = np.zeros_like(image_3d)
@@ -741,32 +778,22 @@ def apply_photobleaching(
     return img5d
 
 
-def to_uint16(
-    image: np.ndarray,
-    clip_percentile: float = 99.9,
-    scale_to: int = 65535
-) -> np.ndarray:
+def to_uint16(image: np.ndarray) -> np.ndarray:
     """
-    Convert float32 image to uint16 with proper scaling.
+    Convert float32 image to uint16, preserving original intensity values.
+    
+    This function does NOT normalize or scale - it preserves the actual
+    intensity values from the simulation. This ensures realistic intensity
+    ranges (e.g., background ~200-500, spots ~1000-3000) rather than
+    artificially inflating to the full uint16 range.
     
     Args:
-        image: Float image
-        clip_percentile: Percentile for clipping bright pixels
-        scale_to: Maximum value after scaling
+        image: Float image with realistic intensity values
         
     Returns:
-        uint16 image
+        uint16 image with same intensity values (clipped to 0-65535)
     """
-    # Clip to percentile to avoid outliers dominating scaling
-    vmax = np.percentile(image, clip_percentile)
-    vmin = image.min()
-    
-    if vmax > vmin:
-        scaled = (image - vmin) / (vmax - vmin) * scale_to
-    else:
-        scaled = np.zeros_like(image)
-    
-    return np.clip(scaled, 0, scale_to).astype(np.uint16)
+    return np.clip(image, 0, 65535).astype(np.uint16)
 
 
 def save_tiff_for_microlive(
@@ -776,26 +803,24 @@ def save_tiff_for_microlive(
     voxel_size_z_nm: float = 300.0,
     time_interval_s: float = 1.0,
     channel_names: Optional[List[str]] = None,
-    clip_percentile: float = 99.9,
     verbose: bool = True
 ) -> str:
     """
     Save 5D image as TIFF with MicroLive-compatible metadata.
     
     MicroLive expects:
-    - TIFF with axes 'TCZYX' (reordered from our TZYXC)
+    - TIFF with axes 'TCZYX' (reordered from our internal TZYXC)
     - PhysicalSizeX, PhysicalSizeZ in µm (stored as JSON in ImageDescription)
     - TimeIncrement in seconds
     - Channel names
     
     Args:
-        img5d: 5D array with shape (T, Z, Y, X, C)
+        img5d: 5D array with shape (T, Z, Y, X, C) - internal TZYXC format
         output_path: Path for output TIFF file
         voxel_size_yx_nm: Pixel size in XY (nanometers)
         voxel_size_z_nm: Pixel size in Z (nanometers)
         time_interval_s: Time between frames (seconds)
         channel_names: Names for each channel
-        clip_percentile: Percentile for intensity clipping
         verbose: Print progress
         
     Returns:
@@ -811,20 +836,22 @@ def save_tiff_for_microlive(
     
     if verbose:
         print(f"Saving TIFF for MicroLive: {output_path}")
-        print(f"  Shape: {img5d.shape} -> reordering to TCZYX")
+        print(f"  Input shape: {img5d.shape} (TZYXC format)")
     
-    # Convert to uint16 with proper scaling
+    # Convert to uint16 preserving original intensity values
     img_uint16 = np.zeros((T, Z, Y, X, C), dtype=np.uint16)
     for c in range(C):
-        img_uint16[:, :, :, :, c] = to_uint16(
-            img5d[:, :, :, :, c], 
-            clip_percentile=clip_percentile
-        )
+        img_uint16[:, :, :, :, c] = to_uint16(img5d[:, :, :, :, c])
     
-    # Reorder from TZYXC to TCZYX (MicroLive format)
-    img_tczyx = np.moveaxis(img_uint16, 4, 1)  # C from axis 4 to axis 1
+    # Transpose from TZYXC (0,1,2,3,4) to TCZYX (0,4,1,2,3)
+    # This ensures tifffile saves with correct axis interpretation
+    img_tczyx = np.transpose(img_uint16, (0, 4, 1, 2, 3))
+    
+    if verbose:
+        print(f"  Output shape: {img_tczyx.shape} (TCZYX format)")
     
     # Prepare metadata (MicroLive reads this from ImageDescription as JSON)
+    # Note: axes is TCZYX to match the transposed array
     metadata = {
         'axes': 'TCZYX',
         'PhysicalSizeX': voxel_size_yx_nm / 1000.0,  # Convert nm to µm
@@ -835,7 +862,8 @@ def save_tiff_for_microlive(
         'SignificantBits': 16,
         'Channel': {
             'Name': channel_names[:C]
-        }
+        },
+        'shape': list(img_tczyx.shape)  # Explicit shape for verification
     }
     
     if verbose:
@@ -845,11 +873,13 @@ def save_tiff_for_microlive(
         print(f"  Channels: {channel_names[:C]}")
     
     # Save with tifffile (with ZLIB compression to reduce file size)
+    # bigtiff=True required for files > 4GB
     tifffile.imwrite(
         output_path,
         img_tczyx,
         shape=img_tczyx.shape,
         dtype='uint16',
+        bigtiff=True,  # Required for files > 4GB
         compression='zlib',  # ZLIB compression (compatible with ImageJ/FIJI)
         imagej=False,
         metadata=metadata
@@ -873,13 +903,11 @@ def save_masks_as_tiff(
     verbose: bool = True
 ) -> Dict[str, str]:
     """
-    Save cytosol and nucleus masks as TIFF files.
+    Save cytosol and nucleus masks as 2D TIFF files (max projection).
     
-    Masks are saved with labeled integers:
+    Masks are max-projected from ZYX to YX and saved with labels:
     - Background = 0
     - Cell/nucleus = cell_id (default 1)
-    
-    This supports future multi-cell simulations where each cell has a unique ID.
     
     Args:
         cytosol_mask: 3D boolean array (Z, Y, X) for cytosol
@@ -899,16 +927,19 @@ def save_masks_as_tiff(
     output_path = Path(output_dir)
     output_path.mkdir(exist_ok=True)
     
+    # Create 2D max projections (YX)
+    cytosol_2d = np.max(cytosol_mask, axis=0)
+    nucleus_2d = np.max(nucleus_mask, axis=0)
+    
     # Convert boolean masks to labeled uint16
-    cytosol_labeled = (cytosol_mask.astype(np.uint16)) * cell_id
-    nucleus_labeled = (nucleus_mask.astype(np.uint16)) * cell_id
+    cytosol_labeled = (cytosol_2d.astype(np.uint16)) * cell_id
+    nucleus_labeled = (nucleus_2d.astype(np.uint16)) * cell_id
     
     # Metadata for ImageJ/MicroLive compatibility
     metadata = {
-        'axes': 'ZYX',
+        'axes': 'YX',
         'PhysicalSizeX': voxel_size_yx_nm / 1000.0,  # Convert nm to µm
         'PhysicalSizeY': voxel_size_yx_nm / 1000.0,
-        'PhysicalSizeZ': voxel_size_z_nm / 1000.0,
         'Unit': 'um'
     }
     
@@ -935,7 +966,7 @@ def save_masks_as_tiff(
     paths['nucleus'] = nuc_path
     
     if verbose:
-        print(f"Saved masks to {output_dir}:")
+        print(f"Saved 2D masks to {output_dir}:")
         print(f"  - mask_cytosol.tif (shape={cytosol_labeled.shape}, label={cell_id})")
         print(f"  - mask_nucleus.tif (shape={nucleus_labeled.shape}, label={cell_id})")
     
@@ -948,6 +979,7 @@ def save_simulation_metadata(
     micro_params: 'MicroscopyParameters',
     image_shape: Tuple[int, ...],
     ground_truth_stats: Optional[Dict] = None,
+    image_stats: Optional[Dict] = None,
     verbose: bool = True
 ) -> str:
     """
@@ -966,7 +998,8 @@ def save_simulation_metadata(
         output_dir: Directory to save metadata file
         sim_params: SimulationParameters used for simulation
         micro_params: MicroscopyParameters used for rendering
-        image_shape: Shape of output image (T, Z, Y, X, C)
+        image_shape: Shape of output image (T, Z, Y, X, C) - internal format
+                     Note: TIFF is saved as TCZYX for MicroLive compatibility
         ground_truth_stats: Optional dict with ground truth counts
         verbose: Print progress
         
@@ -1007,12 +1040,14 @@ def save_simulation_metadata(
         
         # Image Properties Section
         write_section('Image Properties')
-        T, Z, Y, X, C = image_shape
-        write_value('Dimensions (T, Z, Y, X, C)', f'({T}, {Z}, {Y}, {X}, {C})')
-        write_value('Total Frames', T)
-        write_value('Z Slices', Z)
+        T, Z, Y, X, C = image_shape  # Internal TZYXC format
+        # Report as TCZYX (the format saved in TIFF for MicroLive compatibility)
+        write_value('TIFF Axes Order', 'TCZYX')
+        write_value('Dimensions (T, C, Z, Y, X)', f'({T}, {C}, {Z}, {Y}, {X})')
+        write_value('Total Frames (T)', T)
+        write_value('Channels (C)', C)
+        write_value('Z Slices (Z)', Z)
         write_value('Image Size (Y, X)', f'({Y}, {X})')
-        write_value('Channels', C)
         write_value('Pixel Size XY (nm)', micro_params.voxel_size_yx_nm)
         write_value('Pixel Size Z (nm)', micro_params.voxel_size_z_nm)
         write_value('Time Interval (s)', micro_params.time_interval_s)
@@ -1045,11 +1080,12 @@ def save_simulation_metadata(
         write_value('Sigma XY (pixels)', micro_params.psf_sigma_xy)
         write_value('Sigma Z (z-slices)', micro_params.psf_sigma_z)
         
-        write_subsection('Channel Amplitudes')
-        write_value('TS amplitude/nascent chain', micro_params.ts_amplitude_per_nascent_rna)
-        write_value('Mature RNA amplitude', micro_params.mature_rna_amplitude)
-        write_value('Nascent protein amplitude', micro_params.nascent_protein_amplitude_per_chain)
-        write_value('Mature protein scale', micro_params.mature_protein_scale)
+        write_subsection('SNR Parameters')
+        write_value('Mature RNA SNR', micro_params.mature_rna_snr)
+        write_value('TS SNR min', micro_params.ts_snr_min)
+        write_value('TS SNR per nascent RNA', micro_params.ts_snr_per_nascent_rna)
+        write_value('Nascent protein SNR per chain', micro_params.nascent_protein_snr_per_chain)
+        write_value('Mature protein SNR per molecule', micro_params.mature_protein_snr_per_molecule)
         
         write_subsection('Baseline Intensities')
         write_value('Outside cell', micro_params.intensity_outside_cell)
@@ -1080,6 +1116,13 @@ def save_simulation_metadata(
                 write_value(key.replace('_', ' ').title(), value)
         else:
             write_value('Available', 'Yes (see CSV files)')
+        
+        # Image Statistics Section
+        if image_stats:
+            write_section('Channel Intensity Ranges')
+            for ch_name, stats in image_stats.items():
+                ch_str = f"min={stats['min']:.0f}, max={stats['max']:.0f}, mean={stats['mean']:.1f}"
+                write_value(ch_name, ch_str)
         
         # Files Section
         write_section('Output Files')
@@ -1461,7 +1504,8 @@ def generate_ts_dataframe(
             else:
                 size = micro_params.ts_sigma_base + micro_params.ts_sigma_per_nascent_rna * np.log1p(nascent_count)
             
-            amplitude = micro_params.ts_amplitude_per_nascent_rna * nascent_count
+            snr = micro_params.ts_snr_min + micro_params.ts_snr_per_nascent_rna * nascent_count
+            amplitude = micro_params.compute_spot_amplitude(snr, micro_params.intensity_nucleus)
             
             row = {
                 'frame': frame_idx,
@@ -1471,7 +1515,6 @@ def generate_ts_dataframe(
                 'particle': 0,  # TS is always particle 0
                 'image_id': 0,
                 'cell_id': 0,
-                'spot_id': 0,
                 'spot_type': 0,  # TS channel
                 'cluster_size': nascent_count,
                 'is_nuc': True,
@@ -1548,7 +1591,6 @@ def generate_mature_rna_dataframe(
                 'particle': rna['rna_id'],
                 'image_id': 0,
                 'cell_id': 0,
-                'spot_id': rna['rna_id'],
                 'spot_type': 1,  # Mature RNA channel
                 'cluster_size': 1,
                 'is_nuc': not rna.get('in_cytosol', True),
@@ -1562,7 +1604,7 @@ def generate_mature_rna_dataframe(
                 'sim_z': sim_z,
                 'in_cytosol': rna.get('in_cytosol', True),
                 'ground_truth': True,
-                'psf_amplitude_ch_1': micro_params.mature_rna_amplitude,
+                'psf_amplitude_ch_1': micro_params.compute_spot_amplitude(micro_params.mature_rna_snr, micro_params.intensity_cytosol),
                 'psf_sigma_ch_1': micro_params.psf_sigma_xy,
             }
             
@@ -1624,7 +1666,6 @@ def generate_nascent_protein_dataframe(
                 'particle': prot['protein_id'],
                 'image_id': 0,
                 'cell_id': 0,
-                'spot_id': prot['protein_id'],
                 'spot_type': 2,  # Nascent protein channel
                 'cluster_size': 1,
                 'is_nuc': False,  # Nascent proteins are on cytoplasmic RNAs
@@ -1638,7 +1679,7 @@ def generate_nascent_protein_dataframe(
                 'sim_z': sim_z,
                 'parent_rna_id': prot.get('parent_rna_id', -1),
                 'ground_truth': True,
-                'psf_amplitude_ch_2': micro_params.nascent_protein_amplitude_per_chain,
+                'psf_amplitude_ch_2': micro_params.compute_spot_amplitude(micro_params.nascent_protein_snr_per_chain, micro_params.intensity_cytosol),
                 'psf_sigma_ch_2': micro_params.psf_sigma_xy,
             }
             
@@ -1772,7 +1813,19 @@ def simulate_microscopy_stack(
             print("Running biology simulation...")
         
         params_dict = sim_params.to_dict()
-        simulator = GeneExpressionSimulator(params_dict)
+        
+        # Check if we should use simplified model
+        use_simplified = params_dict.get('use_simplified_model', False)
+        
+        if use_simplified:
+            if verbose:
+                print("  Using SIMPLIFIED simulator (tau-leap)")
+            simulator = SimplifiedGeneExpressionSimulator(params_dict)
+        else:
+            if verbose:
+                print("  Using FULL simulator (exact SSA)")
+            simulator = GeneExpressionSimulator(params_dict)
+        
         simulation_results = simulator.run()
         ts_position = simulator.transcription_site
         sim_vol_size = tuple(params_dict['simulation_volume_size'])
@@ -1858,9 +1911,18 @@ def simulate_microscopy_stack(
         # Get state at this time
         state = get_state_at_time(simulation_results, t)
         
-        # Initialize channels with baseline
-        for c in range(C):
-            img5d[t, :, :, :, c] = baseline.copy()
+        # Initialize each channel with appropriate baseline
+        # Channel 0 (TS): Nucleus/cytosol distinction
+        img5d[t, :, :, :, 0] = baseline.copy()
+        
+        # Channel 1-2 (Mature RNA, Nascent Protein): Homogeneous cytosol intensity in cell
+        cell_baseline = np.full((Z, Y, X), micro_params.intensity_outside_cell, dtype=np.float32)
+        cell_baseline[cell_mask] = micro_params.intensity_cytosol
+        img5d[t, :, :, :, 1] = cell_baseline.copy()
+        img5d[t, :, :, :, 2] = cell_baseline.copy()
+        
+        # Channel 3 (Mature Protein): Starts with cytosol, protein signal added later
+        img5d[t, :, :, :, 3] = cell_baseline.copy()
         
         # Channel 0: Transcription Site
         ts_y, ts_x, ts_z = sim_to_image_coords(
@@ -1958,18 +2020,35 @@ def simulate_microscopy_stack(
     
     # Save simulation metadata
     if ground_truth_dir is not None:
+        # Calculate number of frames for averaging
+        n_frames = len(simulation_results['time_steps'])
+        
+        # Ground truth stats: show averages per frame
         gt_stats = {
-            'ts_entries': len(ground_truth.get('ts', [])),
-            'mature_rna_spots': len(ground_truth.get('mature_rna', [])),
-            'nascent_protein_spots': len(ground_truth.get('nascent_protein', [])),
-            'combined_entries': len(ground_truth.get('combined', [])),
+            'num_frames': n_frames,
+            'ts_visible_frames': len(ground_truth.get('ts', [])),
+            'avg_mature_rna_per_frame': f"{len(ground_truth.get('mature_rna', [])) / n_frames:.1f}",
+            'avg_nascent_protein_per_frame': f"{len(ground_truth.get('nascent_protein', [])) / n_frames:.1f}",
         }
+        
+        # Channel intensity stats
+        channel_names = ['TS', 'Mature RNA', 'Nascent Prot', 'Mature Prot']
+        image_stats = {}
+        for c, ch_name in enumerate(channel_names[:C]):
+            ch_data = img5d[:, :, :, :, c]
+            image_stats[ch_name] = {
+                'min': ch_data.min(),
+                'max': ch_data.max(),
+                'mean': ch_data.mean()
+            }
+        
         save_simulation_metadata(
             ground_truth_dir,
             sim_params,
             micro_params,
             img5d.shape,
             ground_truth_stats=gt_stats,
+            image_stats=image_stats,
             verbose=verbose
         )
     
@@ -1978,26 +2057,23 @@ def simulate_microscopy_stack(
         if verbose:
             print("  Converting to uint16...")
         for c in range(C):
-            img5d[:, :, :, :, c] = to_uint16(
-                img5d[:, :, :, :, c], 
-                micro_params.uint16_clip_percentile
-            )
+            img5d[:, :, :, :, c] = to_uint16(img5d[:, :, :, :, c])
         img5d = img5d.astype(np.uint16)
     
-    # Save TIFF if requested
+    # Save TIFF if requested - use save_tiff_for_microlive for proper TCZYX format
     if save_path is not None and HAS_TIFFFILE:
         if verbose:
             print(f"  Saving to {save_path}")
         
-        # Ensure output is uint16 for TIFF
-        if img5d.dtype != np.uint16:
-            img_to_save = np.zeros_like(img5d, dtype=np.uint16)
-            for c in range(C):
-                img_to_save[:, :, :, :, c] = to_uint16(img5d[:, :, :, :, c])
-        else:
-            img_to_save = img5d
-        
-        tifffile.imwrite(save_path, img_to_save, imagej=True)
+        save_tiff_for_microlive(
+            img5d,
+            output_path=save_path,
+            voxel_size_yx_nm=micro_params.voxel_size_yx_nm,
+            voxel_size_z_nm=micro_params.voxel_size_z_nm,
+            time_interval_s=micro_params.time_interval_s,
+            channel_names=micro_params.channel_names,
+            verbose=verbose
+        )
     
     if verbose:
         print("Done!")
@@ -2037,8 +2113,8 @@ if __name__ == "__main__":
         )
         micro_params = MicroscopyParameters(random_seed=42)
     
-    print(f"  Microscopy amplitudes: mature_rna={micro_params.mature_rna_amplitude}, "
-          f"nascent_protein={micro_params.nascent_protein_amplitude_per_chain}")
+    print(f"  Microscopy SNR: mature_rna={micro_params.mature_rna_snr}, "
+          f"nascent_protein={micro_params.nascent_protein_snr_per_chain}")
     
     # Create output directory
     output_dir = Path("./results_simulation")

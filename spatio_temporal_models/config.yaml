@@ -7,28 +7,28 @@
 # All rates are in units of 1/second
 
 kinetics:
-  k_on: 0.2              # Transcription site activation rate
-  k_off: 0.1             # Transcription site deactivation rate
-  k_r: 2.0               # RNA initiation rate (when TS is ON)
-  k_p: 0.2               # Protein translation initiation rate (per cytoplasmic RNA)
+  k_on: 0.5              # Transcription site activation rate
+  k_off: 0.4             # Transcription site deactivation rate
+  k_r: 0.3               # RNA initiation rate (when TS is ON)
+  k_p: 0.01               # Protein translation initiation rate (per cytoplasmic RNA)
 
-  transport_rate: 2.0    # Nuclear export rate (for RNA near envelope)
+  transport_rate: 10.0    # Nuclear export rate (for RNA near envelope)
 
-  gamma_p: 0.03          # Protein degradation rate 
-  gamma_r: 0.03          # RNA degradation rate
+  gamma_p: 0.01          # Protein degradation rate 
+  gamma_r: 0.001          # RNA degradation rate
 
 
   # Diffusion coefficients
-  k_diff_r: 2.0         # RNA diffusion coefficient
-  k_diff_p: 2.0         # Protein diffusion coefficient
+  k_diff_r: 0.5         # RNA diffusion coefficient (in px^2/s)
+  k_diff_p: 0.5         # Protein diffusion coefficient (in px^2/s)
 
 # Elongation Times (NEW)
 # ----------------------
 # Time required for synthesis to complete (deterministic)
 
 elongation:
-  RNA_elongation_time: 2.0       # Seconds to synthesize one RNA (polymerase elongation)
-  Protein_elongation_time: 2.0   # Seconds to synthesize one protein (ribosome elongation)
+  RNA_elongation_time: 3.0       # Seconds to synthesize one RNA (polymerase elongation)
+  Protein_elongation_time: 3.0   # Seconds to synthesize one protein (ribosome elongation)
 
 # Cell Geometry (in pixels)
 # -------------------------
@@ -39,7 +39,7 @@ elongation:
 geometry:
   simulation_volume_size: [512, 512, 100]   # Microscopy field of view
   cytosol_size: [350, 350, 80]              # Cell diameter/height
-  nucleus_size: [120, 100, 60]              # Nucleus diameter/height
+  nucleus_size: [30, 30, 10]              # Nucleus diameter/height
   nucleus_xy_offset: [0, 0]                 # Nucleus offset from center [X, Y]
 
 # Simulation Settings
@@ -51,14 +51,18 @@ geometry:
 simulation:
   total_time: 1800        # Recorded time (seconds) - this is what appears in plots
   frame_rate: 5           # Save state every N seconds
-  burnin_time: 10       # Equilibration time before recording (not shown in output)
+  burnin_time: 2000       # Equilibration time before recording (not shown in output)
   random_seed: 42         # Random seed for reproducibility (remove or set to null for random)
+  
+  # Simplified model (tau-leap, for fast testing)
+  use_simplified_model: true   # Set true to use simplified_simulation.py instead
+  simplified_dt: 0.1            # Time step for simplified model (seconds)
 
 # Transcription Site Options
 # --------------------------
 
 transcription_site:
-  position: random       # Options: 'center' or 'random'
+  position: center       # Options: 'center' or 'random'
 
 # Protein Movement
 # ----------------
@@ -95,7 +99,7 @@ output:
 microscopy:
   # Image Dimensions
   image_size_yx: [512, 512]     # [Y, X] pixels (rows, cols)
-  num_z_slices: 12              # Number of Z slices in stack
+  num_z_slices: 10              # Number of Z slices in stack
   
   # Physical Parameters (for metadata)
   voxel_size_yx_nm: 130.0       # Pixel size in XY (nanometers)
@@ -107,32 +111,42 @@ microscopy:
     sigma_xy: 1.2               # Lateral PSF width (pixels)
     sigma_z: 2.0                # Axial PSF width (z-slice units)
   
-  # Channel Amplitudes (signal intensity)
-  # Higher values = brighter spots = easier to detect
-  amplitudes:
-    # Channel 0: Transcription Site
-    ts_per_nascent_rna: 500.0   # Intensity per nascent RNA at TS
-    ts_min: 100.0               # Minimum TS intensity when active
-    ts_sigma_base: 2.0          # Base PSF sigma for TS
+  # Signal-to-Noise Ratios (spot intensity = SNR × local_background)
+  # This provides realistic spot brightness relative to cell autofluorescence
+  snr:
+    # RNA spots: peak = snr × cytosol_intensity
+    # SNR of 2.5 with cytosol=400 gives peak intensity ~1000
+    mature_rna: 2.5
+    
+    # TS: ACCUMULATIVE - intensity = (min + per_rna × N) × nucleus_intensity
+    # Example: 5 nascent RNAs with nucleus=500 gives (1.5 + 0.5×5) × 500 = 2000
+    ts_min: 1.5              # Minimum SNR when TS active
+    ts_per_nascent_rna: 0.5  # Additional SNR per nascent RNA
+    
+    # Nascent proteins: ACCUMULATIVE per ribosome
+    # Multiple nascent chains on same RNA are additive
+    nascent_protein_per_chain: 1.5
+    
+    # Mature proteins: diffuse signal (no discrete spots)
+    mature_protein_per_molecule: 0.002
+  
+  # Spot Size Parameters (not intensity-related)
+  spot_size:
+    # TS size scales with nascent count
+    ts_sigma_base: 2.0          # Base PSF sigma for TS (pixels)
     ts_sigma_per_rna: 0.3       # Additional sigma per nascent RNA
     ts_size_function: 'sqrt'    # 'sqrt' or 'log' for size scaling
     
-    # Channel 1: Mature RNA spots
-    mature_rna: 800.0           # Single RNA spot intensity (INCREASED from 300)
-    
-    # Channel 2: Nascent Protein spots
-    nascent_protein_per_chain: 400.0  # Intensity per nascent chain (INCREASED from 200)
-    
-    # Channel 3: Mature Protein (diffuse signal)
-    mature_protein_scale: 0.2   # Intensity per protein (INCREASED from 0.1)
-    mature_protein_blur_sigma: 15.0  # Blur to simulate diffusion
+    # Mature protein diffuse blur
+    mature_protein_blur_sigma: 15.0  # Blur sigma to simulate diffusion
   
-  # Baseline Intensities (camera offset / autofluorescence)
-  # NOTE: Hierarchy should be: background < cytosol < nucleus
+  # Baseline Intensities (realistic camera/autofluorescence values)
+  # These determine the absolute intensity scale of the image
+  # Typical confocal: background 200-500, max ~3000-10000
   baseline:
-    outside_cell: 100.0         # Background outside cell (lowest)
-    cytosol: 120.0              # Cytoplasmic autofluorescence (medium)
-    nucleus: 150.0              # Nuclear autofluorescence (highest)
+    outside_cell: 1000        # Background outside cell
+    cytosol: 1600             # Cytoplasmic autofluorescence
+    nucleus: 1800             # Nuclear autofluorescence (slightly higher)
   
   # Noise Parameters
   noise:
@@ -154,10 +168,10 @@ microscopy:
   # k=0.0 means no photobleaching (default)
   # Typical range: 0.0001 to 0.01 s⁻¹ (rSNAPed uses 0.001 s⁻¹)
   photobleaching:
-    channel_0_decay_rate: 0.001    # TS channel
-    channel_1_decay_rate: 0.001    # Mature RNA
-    channel_2_decay_rate: 0.001    # Nascent Protein
-    channel_3_decay_rate: 0.001    # Mature Protein
+    channel_0_decay_rate: 0.00016    # TS: ~25% loss
+    channel_1_decay_rate: 0.00012    # Mature RNA: ~20% loss
+    channel_2_decay_rate: 0.00016    # Nascent Protein: ~25% loss
+    channel_3_decay_rate: 0.00020    # Mature Protein: ~30% loss
   
   # Random seed (null for random, or integer for reproducibility)
   random_seed: 42

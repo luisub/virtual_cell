@@ -1,5 +1,6 @@
 
 import numpy as np
+import dataclasses
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
 import yaml
@@ -88,6 +89,10 @@ class SimulationParameters:
     frame_rate: float = 1.0
     burnin_time: float = 0.0
     random_seed: int = None  # Random seed for reproducibility (None = random)
+    
+    # Simplified model options (for fast testing)
+    use_simplified_model: bool = False  # Use tau-leap simplified simulator
+    simplified_dt: float = 0.1          # Time step for simplified model
     
     # Options
     position_TS: str = 'random'
@@ -202,6 +207,9 @@ class SimulationParameters:
             'frame_rate': self.frame_rate,
             'burnin_time': self.burnin_time,
             'random_seed': self.random_seed,
+            'use_simplified_model': self.use_simplified_model,
+            'simplified_dt': self.simplified_dt,
+            'dt': self.simplified_dt,  # Alias for SimplifiedGeneExpressionSimulator
             'position_TS': self.position_TS,
             'movement_protein_into_nucleus': self.movement_protein_into_nucleus,
             'apply_drug': self.apply_drug,
@@ -281,7 +289,11 @@ class SimulationParameters:
             if 'show_nascent_separately' in config['output']:
                 params['show_nascent_separately'] = config['output']['show_nascent_separately']
         
-        return cls(**params)
+        # Filter to only known fields (ignore unknown keys like use_simplified_model)
+        known_fields = {f.name for f in dataclasses.fields(cls)}
+        filtered_params = {k: v for k, v in params.items() if k in known_fields}
+        
+        return cls(**filtered_params)
 
 
 
@@ -494,8 +506,16 @@ class GeneExpressionSimulator:
         return is_in_cytosol and not self.is_within_nucleus(entity)
     
     def move_particle(self, entity, rate):
-        """Move particle with Brownian motion, confined to appropriate region."""
-        displacement = np.random.normal(scale=np.sqrt(rate), size=3)
+        """Move particle with Brownian motion, confined to appropriate region.
+        
+        In SSA (Gillespie), diffusion is modeled as a jump process with rate R.
+        The diffusion coefficient D relates to rate R and jump variance sigma^2 as:
+        D = 1/2 * R * sigma^2.
+        
+        To make the recovered D exactly equal to the input rate parameter (k_diff),
+        we use a jump variance of sigma^2 = 2.0.
+        """
+        displacement = np.random.normal(scale=np.sqrt(2.0), size=3)
         current_position = np.array(entity['position'][:3])
         new_position = current_position + displacement
         temp_entity = {'position': new_position.tolist()}
@@ -653,32 +673,33 @@ class GeneExpressionSimulator:
                 rna_info = self.RNAs[entity_id]
                 rna_info['in_cytosol'] = True
                 
-                nucleus_radius = np.array(self.rates['nucleus_size']) / 2
+                nucleus_radii = np.array(self.rates['nucleus_size']) / 2  # [rx, ry, rz]
                 nucleus_center = self.nucleus_center
                 
-                # Direction vector points outward from nucleus center
-                direction_vector = np.array(rna_info['position'][:3]) - nucleus_center
-                norm = np.linalg.norm(direction_vector)
-                if norm > 1e-10:  # Avoid division by zero
-                    direction_vector /= norm
-                else:
-                    # RNA is at nucleus center - default to upward direction
-                    direction_vector = np.array([0.0, 0.0, 1.0])
+                # Current position relative to nucleus center
+                pos = np.array(rna_info['position'][:3])
+                rel_pos = pos - nucleus_center
                 
-                # Calculate new position just outside the nucleus
-                new_position = nucleus_center + direction_vector * (nucleus_radius + self.small_distance_outside_nucleus)
+                # Normalize by radii to get direction in "spherical" space
+                normalized_dir = rel_pos / nucleus_radii
+                norm = np.linalg.norm(normalized_dir)
+                
+                if norm > 1e-10:
+                    # Scale to unit sphere, then scale back to ellipsoid surface
+                    normalized_dir /= norm
+                    # Point on ellipsoid surface: center + radii * normalized_direction
+                    surface_point = nucleus_center + nucleus_radii * normalized_dir
+                else:
+                    # RNA is at nucleus center - place at top of nucleus
+                    surface_point = nucleus_center + np.array([0.0, 0.0, nucleus_radii[2]])
+                
+                # Place RNA just outside the surface (in the outward direction)
+                outward_offset = normalized_dir * self.small_distance_outside_nucleus if norm > 1e-10 else np.array([0.0, 0.0, self.small_distance_outside_nucleus])
+                new_position = surface_point + outward_offset
                 
                 # For half-ellipsoid: ensure Z >= 0 (stay on coverslip side)
                 if new_position[2] < 0:
-                    xy_dist_sq = (new_position[0] - nucleus_center[0])**2 / nucleus_radius[0]**2 + \
-                                 (new_position[1] - nucleus_center[1])**2 / nucleus_radius[1]**2
-                    if xy_dist_sq < 1:
-                        # Inside XY footprint - place just above nucleus top
-                        z_top = nucleus_center[2] + nucleus_radius[2] * np.sqrt(max(0, 1 - xy_dist_sq))
-                        new_position[2] = z_top + self.small_distance_outside_nucleus
-                    else:
-                        # Outside XY footprint - set Z to small positive value
-                        new_position[2] = self.small_distance_outside_nucleus
+                    new_position[2] = self.small_distance_outside_nucleus
                 
                 rna_info['position'] = new_position.tolist()
                 
