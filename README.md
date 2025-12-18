@@ -62,7 +62,7 @@ virtual_cell/
 │   └── Figure_4_*.ipynb              # Publication figures
 ├── spatio_temporal_models/
 │   ├── microscopy_simulation.py      # Microscopy image simulator
-│   ├── minimal_simulation.py         # 3D Gillespie SSA simulator
+│   ├── full_simulation.py            # 3D Gillespie SSA simulator
 │   ├── plotting.py                   # Visualization utilities
 │   ├── config.yaml                   # Simulation configuration
 │   └── results_simulation/           # Output directory
